@@ -1,0 +1,21 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.Evga314.farplanetwocontinuation.mixin.client",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "FogRendererMixin",
+    "GameRendererMixin",
+    "KeyboardHandlerMixin",
+    "LevelRendererClearColorMixin",
+    "LevelRendererMixin",
+    "RenderSectionMixin",
+    "VideoSettingsScreenMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "requireAnnotations": true
+  }
+}

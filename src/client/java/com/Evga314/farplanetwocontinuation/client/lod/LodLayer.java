@@ -1,0 +1,546 @@
+package com.Evga314.farplanetwocontinuation.client.lod;
+
+import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
+import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
+import com.Evga314.farplanetwocontinuation.tile.TilePos;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.logging.LogUtils;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.PriorityQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import net.minecraft.core.Registry;
+import net.minecraft.util.Util;
+import net.minecraft.world.level.biome.Biome;
+import org.slf4j.Logger;
+
+/**
+ * One kind of LOD tiles around the camera. Every tick it walks a quadtree, decides which tiles are drawn, asks the server for
+ * missing ones and keeps its GPU memory under the budget. Everything except mesh building runs on the client thread.
+ */
+abstract class LodLayer {
+    private static final Logger LOGGER = LogUtils.getLogger();
+    private static final long REQUEST_TIMEOUT_MS = 20_000L;
+    private static final int MAX_BUILD_BACKLOG = 384;
+    /** Refreshes only go out when nothing is missing, so they never hold back tiles that are not loaded at all. */
+    private static final double REFRESH_PRIORITY = 1.0E9;
+    /** Refreshes sent per tick at most, so keeping tiles fresh stays a light background load on the server. */
+    private static final int MAX_REFRESHES_PER_TICK = 8;
+    /** A tile whose blocks changed is loaded again at most this often, so building next to it does not reload it all the time. */
+    private static final long CHANGED_REFRESH_MS = 3_000L;
+    /**
+     * Share of the GPU budget given to tiles on screen. The rest is room for hidden parents kept as fallback and for tiles that are
+     * still loading.
+     */
+    static final double LEAF_SHARE = 0.6;
+    private static final int MIN_LEAVES = 16;
+
+    private final String name;
+    private final Executor meshExecutor;
+    final Long2ObjectOpenHashMap<TileMesh> meshes = new Long2ObjectOpenHashMap<>();
+    private final Long2LongOpenHashMap pending = new Long2LongOpenHashMap();
+    private final LongOpenHashSet building = new LongOpenHashSet();
+    /**
+     * Tiles the server answered with nothing to draw (for example chunks that are not generated yet), with the time of the answer.
+     * They count as loaded until they are due again; without this they would be asked for again every tick.
+     */
+    private final Long2LongOpenHashMap empty = new Long2LongOpenHashMap();
+    private final ConcurrentLinkedQueue<TileMeshBuilder.Built> built = new ConcurrentLinkedQueue<>();
+    /** Meshes replaced by fresher data. They may still be in this tick's draw list, so they are closed on the next tick. */
+    private final List<TileMesh> retired = new ArrayList<>();
+    private List<TileMesh> drawList = List.of();
+    private int epoch;
+
+    private final ArrayList<TileMesh> nextDrawList = new ArrayList<>();
+    private final LongOpenHashSet allowedSplits = new LongOpenHashSet();
+    private final Long2ByteOpenHashMap readyStates = new Long2ByteOpenHashMap();
+    private final Long2ByteOpenHashMap relevantStates = new Long2ByteOpenHashMap();
+    private final ArrayList<Candidate> candidates = new ArrayList<>();
+    protected LodView view;
+    protected long tick;
+    private long now;
+
+    LodLayer(String name, Executor meshExecutor) {
+        this.name = name;
+        this.meshExecutor = meshExecutor;
+    }
+
+    /** Finest level drawn right now. */
+    abstract int minLevel();
+
+    /** Coarsest level this layer has; also the upper bound accepted from the server. */
+    abstract int maxLevel();
+
+    /** Horizontal distance from the camera within which tiles are wanted. */
+    abstract double reach();
+
+    abstract double splitFactor();
+
+    /** How many meshes may stay on the GPU. */
+    abstract int maxMeshes();
+
+    /** Extra reasons to leave a tile out, on top of distance, world bounds and vanilla coverage. */
+    boolean extraRelevant(TilePos pos) {
+        return true;
+    }
+
+    boolean drawable(TileMesh mesh) {
+        return true;
+    }
+
+    /** Requests sent and not answered yet. More keeps the server busy, fewer keeps the answers fresh while the player moves. */
+    int maxOutstandingRequests() {
+        return 96;
+    }
+
+    /**
+     * Whether a missing tile is loaded as a stand-in while its finer children load. Rough terrain needs it, there is nothing below it;
+     * detailed tiles do not, because the rough terrain already fills every gap, and each finer tile is shown as soon as it arrives.
+     */
+    boolean loadsFallbackParents() {
+        return true;
+    }
+
+    /** Load order of missing tiles, smaller first: big and close tiles first, so the whole view is covered quickly. */
+    double priority(TilePos pos, double distance) {
+        return distance / pos.size();
+    }
+
+    /** How long a tile without anything to draw counts as loaded before it is asked for again. */
+    long emptyRetryMs() {
+        return REQUEST_TIMEOUT_MS;
+    }
+
+    /** How old a drawn tile may get before it is asked for again; rough terrain never changes. */
+    long refreshIntervalMs(TileMesh mesh) {
+        return Long.MAX_VALUE;
+    }
+
+    abstract boolean canSendRequests();
+
+    abstract void sendRequests(int[] requests);
+
+    /** Decodes and meshes one tile on a mesh builder thread. Throws on bad data. */
+    abstract TileMeshBuilder.Built build(byte[] data, long key, int epoch, Registry<Biome> biomes, int seaLevel) throws Exception;
+
+    List<TileMesh> drawList() {
+        return this.drawList;
+    }
+
+    int meshCount() {
+        return this.meshes.size();
+    }
+
+    int pendingCount() {
+        return this.pending.size() + this.building.size();
+    }
+
+    String stats() {
+        return this.name + ": tiles=" + this.meshes.size() + " drawn=" + this.drawList.size() + " pending=" + this.pending.size()
+            + " building=" + this.building.size() + " empty=" + this.empty.size() + " wanted=" + this.candidates.size();
+    }
+
+    boolean hasWork() {
+        return !this.meshes.isEmpty() || !this.pending.isEmpty() || !this.building.isEmpty() || !this.empty.isEmpty();
+    }
+
+    void reset() {
+        this.epoch++;
+        for (TileMesh mesh : this.meshes.values()) {
+            mesh.close();
+        }
+        this.closeRetired();
+        this.meshes.clear();
+        this.pending.clear();
+        this.building.clear();
+        this.empty.clear();
+        this.built.clear();
+        this.drawList = List.of();
+        this.candidates.clear();
+    }
+
+    private void closeRetired() {
+        for (TileMesh mesh : this.retired) {
+            mesh.close();
+        }
+        this.retired.clear();
+    }
+
+    /** Every tile of this layer over a chunk counts as outdated: it is shown until fresh data arrives, which is asked for when drawn. */
+    void markChanged(int chunkX, int chunkZ) {
+        for (int level = this.lowestLevel(); level <= this.maxLevel(); level++) {
+            long size = FarPlaneConstants.tileSize(level);
+            long key = new TilePos(level, (int) Math.floorDiv(chunkX * 16L, size), (int) Math.floorDiv(chunkZ * 16L, size)).pack();
+            TileMesh mesh = this.meshes.get(key);
+            if (mesh != null) {
+                mesh.changedAt = Util.getMillis();
+            }
+            this.empty.remove(key);
+        }
+    }
+
+    /** Lowest level this layer can have tiles of. */
+    int lowestLevel() {
+        return 0;
+    }
+
+    void onData(int level, int x, int z, byte[] bytes, Registry<Biome> biomes, int seaLevel) {
+        if (level < 0 || level > this.maxLevel()) {
+            return;
+        }
+        TilePos pos = new TilePos(level, x, z);
+        if (!pos.isInsideWorld()) {
+            return;
+        }
+        long key = pos.pack();
+        // Only data that was asked for is accepted, so late answers to old requests cannot fill memory after a reset.
+        if (!this.pending.containsKey(key)) {
+            return;
+        }
+        this.pending.remove(key);
+        if (this.building.contains(key) || this.building.size() >= MAX_BUILD_BACKLOG) {
+            return;
+        }
+        int buildEpoch = this.epoch;
+        this.building.add(key);
+        try {
+            this.meshExecutor.execute(() -> {
+                try {
+                    this.built.add(this.build(bytes, key, buildEpoch, biomes, seaLevel));
+                } catch (Exception e) {
+                    LOGGER.debug("Dropping bad {} tile {}", this.name, pos, e);
+                    this.built.add(TileMeshBuilder.Built.failed(key, buildEpoch));
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            this.building.remove(key);
+        }
+    }
+
+    /** Uploads finished meshes on the render thread. Returns how much of the per-frame upload budget is left. */
+    int upload(int budget) {
+        TileMeshBuilder.Built result;
+        while (budget > 0 && (result = this.built.poll()) != null) {
+            if (result.epoch() != this.epoch) {
+                continue;
+            }
+            this.building.remove(result.key());
+            if (result.vertices() == null || result.indexCount() == 0) {
+                // Old terrain that is now empty must not stay on screen.
+                TileMesh old = this.meshes.remove(result.key());
+                if (old != null) {
+                    this.retired.add(old);
+                }
+                this.empty.put(result.key(), Util.getMillis());
+                continue;
+            }
+            this.empty.remove(result.key());
+            TilePos pos = TilePos.unpack(result.key());
+            GpuBuffer buffer = RenderSystem.getDevice().createBuffer(() -> "FarPlane " + this.name + " tile " + pos, GpuBuffer.USAGE_VERTEX, result.vertices());
+            TileMesh mesh = new TileMesh(pos, buffer, result, Util.getMillis());
+            // A fresh tile has not been walked over yet; without this it would be the first one evicted.
+            mesh.lastUsedTick = this.tick;
+            TileMesh old = this.meshes.put(result.key(), mesh);
+            if (old != null) {
+                this.retired.add(old);
+            }
+            this.onUploaded(mesh);
+            budget--;
+        }
+        return budget;
+    }
+
+    void onUploaded(TileMesh mesh) {
+    }
+
+    void expirePending(long now) {
+        this.pending.long2LongEntrySet().removeIf(entry -> now - entry.getLongValue() > REQUEST_TIMEOUT_MS);
+        long retry = this.emptyRetryMs();
+        this.empty.long2LongEntrySet().removeIf(entry -> now - entry.getLongValue() > retry);
+    }
+
+    void select(LodView view, long tick, long now) {
+        this.view = view;
+        this.tick = tick;
+        this.now = now;
+        this.nextDrawList.clear();
+        this.candidates.clear();
+        this.readyStates.clear();
+        this.relevantStates.clear();
+
+        double reach = this.reach();
+        int rootLevel = this.minLevel();
+        while (rootLevel < this.maxLevel() && (long) FarPlaneConstants.tileSize(rootLevel) * 2L < reach) {
+            rootLevel++;
+        }
+        long rootSize = FarPlaneConstants.tileSize(rootLevel);
+        double limit = FarPlaneConstants.WORLD_LIMIT;
+        long minX = Math.floorDiv((long) Math.floor(Math.max(view.camX - reach, -limit)), rootSize);
+        long maxX = Math.floorDiv((long) Math.floor(Math.min(view.camX + reach, limit)), rootSize);
+        long minZ = Math.floorDiv((long) Math.floor(Math.max(view.camZ - reach, -limit)), rootSize);
+        long maxZ = Math.floorDiv((long) Math.floor(Math.min(view.camZ + reach, limit)), rootSize);
+        List<TilePos> roots = new ArrayList<>();
+        for (long z = minZ; z <= maxZ; z++) {
+            for (long x = minX; x <= maxX; x++) {
+                roots.add(new TilePos(rootLevel, (int) x, (int) z));
+            }
+        }
+        this.planSplits(roots);
+        for (TilePos root : roots) {
+            this.visit(root);
+        }
+        this.drawList = List.copyOf(this.nextDrawList);
+        this.closeRetired();
+    }
+
+    /**
+     * Decides up front which tiles may split, most important first (big tiles close to the camera), until the tiles on screen would
+     * no longer fit into the GPU memory budget. With a small budget distant terrain simply stays coarser. Without this the wanted
+     * tiles would not fit, and tiles would be evicted and loaded again every tick, which shows up as flickering.
+     */
+    private void planSplits(List<TilePos> roots) {
+        this.allowedSplits.clear();
+        int maxLeaves = Math.max(MIN_LEAVES, (int) (this.maxMeshes() * LEAF_SHARE));
+        PriorityQueue<SplitCandidate> queue = new PriorityQueue<>(Comparator.comparingDouble(SplitCandidate::score).reversed());
+        int leaves = 0;
+        for (TilePos root : roots) {
+            if (this.isRelevant(root)) {
+                leaves++;
+                this.offerSplit(queue, root);
+            }
+        }
+        while (!queue.isEmpty()) {
+            TilePos pos = queue.poll().pos();
+            int children = 0;
+            for (int i = 0; i < 4; i++) {
+                if (this.isRelevant(pos.child(i))) {
+                    children++;
+                }
+            }
+            if (leaves - 1 + children > maxLeaves) {
+                break;
+            }
+            leaves += children - 1;
+            this.allowedSplits.add(pos.pack());
+            for (int i = 0; i < 4; i++) {
+                TilePos child = pos.child(i);
+                if (this.isRelevant(child)) {
+                    this.offerSplit(queue, child);
+                }
+            }
+        }
+    }
+
+    private void offerSplit(PriorityQueue<SplitCandidate> queue, TilePos pos) {
+        double distance = this.effectiveDistance(pos);
+        if (pos.level() > this.minLevel() && distance < this.splitFactor() * pos.size()) {
+            queue.add(new SplitCandidate(pos, pos.size() / Math.max(distance, 1.0)));
+        }
+    }
+
+    /** Cached per tick: the same tiles are checked by the split plan, the walk and the readiness test. */
+    boolean isRelevant(TilePos pos) {
+        long key = pos.pack();
+        byte cached = this.relevantStates.get(key);
+        if (cached != 0) {
+            return cached > 0;
+        }
+        boolean relevant = pos.isInsideWorld()
+            && pos.distanceTo(this.view.camX, this.view.camZ) <= this.reach()
+            && this.extraRelevant(pos)
+            && !this.view.coveredByVanilla(pos, this.verticalDistance(pos, true));
+        this.relevantStates.put(key, relevant ? (byte) 1 : (byte) -1);
+        return relevant;
+    }
+
+    /** Vertical distance from the camera to the terrain of a tile, taken from the tile itself or the closest loaded parent. */
+    double verticalDistance(TilePos pos, boolean farthest) {
+        TilePos current = pos;
+        double camY = this.view.camY;
+        while (current.level() <= this.maxLevel()) {
+            TileMesh mesh = this.meshes.get(current.pack());
+            if (mesh != null) {
+                return farthest
+                    ? Math.max(Math.abs(camY - mesh.terrainMinY), Math.abs(camY - mesh.maxY))
+                    : Math.max(0.0, Math.max(camY - mesh.maxY, mesh.terrainMinY - camY));
+            }
+            current = new TilePos(current.level() + 1, Math.floorDiv(current.x(), 2), Math.floorDiv(current.z(), 2));
+        }
+        return this.view.fallbackVertical(farthest);
+    }
+
+    double effectiveDistance(TilePos pos) {
+        double horizontal = pos.distanceTo(this.view.camX, this.view.camZ);
+        double vertical = this.verticalDistance(pos, false);
+        return Math.sqrt(horizontal * horizontal + vertical * vertical);
+    }
+
+    private void visit(TilePos pos) {
+        if (!this.isRelevant(pos)) {
+            return;
+        }
+        double distance = this.effectiveDistance(pos);
+        TileMesh own = this.meshes.get(pos.pack());
+        if (own != null) {
+            // Parents hidden behind their children stay as a fallback, but are the first to go when memory runs out.
+            own.lastUsedTick = Math.max(own.lastUsedTick, this.tick - 1);
+        }
+        if (!this.allowedSplits.contains(pos.pack())) {
+            if (own != null && this.drawable(own)) {
+                this.draw(own, distance);
+            } else {
+                this.request(pos, distance);
+            }
+            return;
+        }
+
+        boolean childrenReady = true;
+        for (int i = 0; i < 4; i++) {
+            TilePos child = pos.child(i);
+            if (this.isRelevant(child) && !this.isReady(child)) {
+                childrenReady = false;
+            }
+        }
+
+        if (childrenReady || own == null || !this.drawable(own)) {
+            if (own == null && !childrenReady && this.loadsFallbackParents()) {
+                this.request(pos, distance);
+            }
+            for (int i = 0; i < 4; i++) {
+                this.visit(pos.child(i));
+            }
+        } else {
+            this.draw(own, distance);
+            for (int i = 0; i < 4; i++) {
+                TilePos child = pos.child(i);
+                if (!this.isRelevant(child)) {
+                    continue;
+                }
+                TileMesh childMesh = this.meshes.get(child.pack());
+                if (childMesh != null) {
+                    childMesh.lastUsedTick = this.tick;
+                } else if (!this.empty.containsKey(child.pack())) {
+                    this.request(child, this.effectiveDistance(child));
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether everything that would be drawn in place of a tile is loaded: the tile itself, or, when it splits further, all of its
+     * relevant children. Without the second case a hidden middle tile that got evicted would keep its parent from switching to the
+     * finer tiles, and the middle tile would be requested again and again.
+     */
+    private boolean isReady(TilePos pos) {
+        long key = pos.pack();
+        byte cached = this.readyStates.get(key);
+        if (cached != 0) {
+            return cached > 0;
+        }
+        boolean ready = this.meshes.containsKey(key) || this.empty.containsKey(key);
+        if (!ready && this.allowedSplits.contains(key)) {
+            ready = true;
+            for (int i = 0; i < 4; i++) {
+                TilePos child = pos.child(i);
+                if (this.isRelevant(child) && !this.isReady(child)) {
+                    ready = false;
+                    break;
+                }
+            }
+        }
+        this.readyStates.put(key, ready ? (byte) 1 : (byte) -1);
+        return ready;
+    }
+
+    private void draw(TileMesh mesh, double distance) {
+        mesh.lastUsedTick = this.tick;
+        mesh.discardRadius = 0.0F;
+        mesh.keepRadius = 0.0F;
+        this.nextDrawList.add(mesh);
+        if (mesh.changedAt > mesh.receivedAt && this.now - mesh.receivedAt > CHANGED_REFRESH_MS) {
+            // Changed blocks are as urgent as a missing tile: the old mesh stays on screen only until the new one arrives. As a
+            // background refresh it would wait behind every tile still loading, which while flying around is forever.
+            this.enqueue(mesh.pos, this.priority(mesh.pos, distance));
+        } else if (this.now - mesh.receivedAt > this.refreshIntervalMs(mesh)) {
+            this.enqueue(mesh.pos, REFRESH_PRIORITY + distance / mesh.pos.size());
+        }
+    }
+
+    private void request(TilePos pos, double distance) {
+        long key = pos.pack();
+        if (!this.meshes.containsKey(key) && !this.empty.containsKey(key)) {
+            this.enqueue(pos, this.priority(pos, distance));
+        }
+    }
+
+    private void enqueue(TilePos pos, double priority) {
+        long key = pos.pack();
+        if (!this.pending.containsKey(key) && !this.building.contains(key)) {
+            this.candidates.add(new Candidate(key, priority));
+        }
+    }
+
+    void sendRequests(long now) {
+        int room = this.maxOutstandingRequests() - this.pending.size();
+        if (room <= 0 || this.candidates.isEmpty() || !this.canSendRequests()) {
+            return;
+        }
+        this.candidates.sort(Comparator.comparingDouble(Candidate::priority));
+        int missing = 0;
+        while (missing < this.candidates.size() && this.candidates.get(missing).priority() < REFRESH_PRIORITY) {
+            missing++;
+        }
+        int count = Math.min(room, Math.min(this.candidates.size(), missing + MAX_REFRESHES_PER_TICK));
+        int sent = 0;
+        while (sent < count) {
+            int batch = Math.min(FarPlanePayloads.MAX_REQUESTS_PER_PACKET, count - sent);
+            int[] requests = new int[batch * 3];
+            for (int i = 0; i < batch; i++) {
+                long key = this.candidates.get(sent + i).key();
+                TilePos pos = TilePos.unpack(key);
+                requests[i * 3] = pos.level();
+                requests[i * 3 + 1] = pos.x();
+                requests[i * 3 + 2] = pos.z();
+                this.pending.put(key, now);
+            }
+            this.sendRequests(requests);
+            sent += batch;
+        }
+    }
+
+    void evict() {
+        int limit = this.maxMeshes();
+        if (this.meshes.size() <= limit) {
+            return;
+        }
+        List<TileMesh> unused = new ArrayList<>();
+        for (TileMesh mesh : this.meshes.values()) {
+            if (mesh.lastUsedTick < this.tick) {
+                unused.add(mesh);
+            }
+        }
+        unused.sort(Comparator.comparingLong(mesh -> mesh.lastUsedTick));
+        int target = limit - limit / 10;
+        for (TileMesh mesh : unused) {
+            if (this.meshes.size() <= target) {
+                break;
+            }
+            this.meshes.remove(mesh.pos.pack());
+            mesh.close();
+        }
+    }
+
+    private record Candidate(long key, double priority) {
+    }
+
+    private record SplitCandidate(TilePos pos, double score) {
+    }
+}

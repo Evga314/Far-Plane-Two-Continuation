@@ -1,26 +1,37 @@
 package com.Evga314.farplanetwocontinuation.server;
 
+import com.Evga314.farplanetwocontinuation.WorkThrottle;
 import com.Evga314.farplanetwocontinuation.tile.DetailData;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import com.mojang.logging.LogUtils;
+import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.Holder;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.SectionPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
-import net.minecraft.world.level.chunk.storage.SerializableChunkData;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.PalettedContainerFactory;
+import net.minecraft.world.level.chunk.PalettedContainerRO;
 import net.minecraft.world.level.levelgen.Heightmap;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -49,12 +60,18 @@ final class DetailGenerator {
         byte[] biomeIndices = new byte[DetailData.CELL_COUNT];
         short[] tops = new short[DetailData.CELL_COUNT * RUNS];
         short[] bottoms = new short[DetailData.CELL_COUNT * RUNS];
-        byte[] colors = new byte[DetailData.CELL_COUNT * RUNS];
+        short[] rawBlocks = new short[DetailData.CELL_COUNT * RUNS];
+        short[] rawSides = new short[DetailData.CELL_COUNT * RUNS];
+        byte[] blocks = new byte[DetailData.CELL_COUNT * RUNS];
         byte[] sides = new byte[DetailData.CELL_COUNT * RUNS];
+        byte[] heights = new byte[DetailData.CELL_COUNT * RUNS];
+        byte[] plants = new byte[DetailData.CELL_COUNT];
         long[] missing = new long[DetailData.CELL_COUNT / 64];
         TileGenerator.Palette palette = new TileGenerator.Palette();
+        BlockPalette blockPalette = new BlockPalette();
 
         for (int cz = 0; cz < DetailData.CELLS; cz++) {
+            WorkThrottle.yieldToFrames();
             for (int cx = 0; cx < DetailData.CELLS; cx++) {
                 int index = cx + cz * DetailData.CELLS;
                 Column column = context.column(cx, cz);
@@ -62,7 +79,18 @@ final class DetailGenerator {
                     missing[index >> 6] |= 1L << (index & 63);
                     continue;
                 }
-                runCounts[index] = (byte) column.summary.runs(column.x, column.z, tops, bottoms, colors, sides, index * RUNS);
+                int base = index * RUNS;
+                int runs = column.summary.runs(column.x, column.z, tops, bottoms, rawBlocks, rawSides, heights, base);
+                runCounts[index] = (byte) runs;
+                for (int run = 0; run < runs; run++) {
+                    blocks[base + run] = (byte) blockPalette.index(Short.toUnsignedInt(rawBlocks[base + run]));
+                    sides[base + run] = (byte) blockPalette.index(Short.toUnsignedInt(rawSides[base + run]));
+                }
+                int plant = column.summary.plant(column.x, column.z);
+                if (plant != 0 && runs > 0) {
+                    int plantIndex = blockPalette.index(plant);
+                    plants[index] = plantIndex < DetailData.MAX_PALETTE - 1 ? (byte) (plantIndex + 1) : (byte) DetailData.NO_PLANT;
+                }
                 Holder<Biome> biome = column.summary.biome(column.x, column.z);
                 if (biome != null) {
                     biomeIndices[index] = (byte) palette.index(biome);
@@ -72,7 +100,34 @@ final class DetailGenerator {
         if (palette.ids.isEmpty()) {
             palette.ids.add(FALLBACK_BIOME);
         }
-        return new DetailData(runCounts, biomeIndices, tops, bottoms, colors, sides, missing, palette.ids);
+        if (blockPalette.ids.isEmpty()) {
+            blockPalette.index(BuiltInRegistries.BLOCK.getId(Blocks.STONE));
+        }
+        return new DetailData(runCounts, biomeIndices, tops, bottoms, blocks, sides, heights, plants, missing, palette.ids, blockPalette.ids);
+    }
+
+    /** Blocks of one tile, by name. A tile with more different blocks than fit shows the rest as its first block. */
+    private static final class BlockPalette {
+        final List<Identifier> ids = new ArrayList<>();
+        private final Int2IntOpenHashMap indices = new Int2IntOpenHashMap();
+
+        BlockPalette() {
+            this.indices.defaultReturnValue(-1);
+        }
+
+        int index(int rawId) {
+            int index = this.indices.get(rawId);
+            if (index >= 0) {
+                return index;
+            }
+            if (this.ids.size() >= DetailData.MAX_PALETTE) {
+                return 0;
+            }
+            index = this.ids.size();
+            this.ids.add(BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(rawId)));
+            this.indices.put(rawId, index);
+            return index;
+        }
     }
 
     /** One block column inside a chunk summary; x and z are local to the chunk. */
@@ -182,6 +237,60 @@ final class DetailGenerator {
             }
         }
 
+        /**
+         * Only what the summary needs is decoded: the surface heightmap, the blocks of the sections from the top of the chunk down to
+         * how deep runs are looked for, and the biomes where the tops of the columns are. Light, entities, ticks, structures and
+         * deep sections, most of a saved chunk, are never touched.
+         */
+        private @Nullable ChunkSummary summarize(CompoundTag tag) {
+            if (!tag.read("Status", ChunkStatus.CODEC).orElse(ChunkStatus.EMPTY).isOrAfter(ChunkStatus.FEATURES)) {
+                return null;
+            }
+            SimpleBitStorage heights = null;
+            long[] raw = tag.getCompound("Heightmaps").flatMap(maps -> maps.getLongArray(Heightmap.Types.WORLD_SURFACE.getSerializationKey())).orElse(null);
+            if (raw != null) {
+                try {
+                    heights = new SimpleBitStorage(Mth.ceillog2(this.level.getHeight() + 1), 256, raw);
+                } catch (RuntimeException e) {
+                    heights = null;
+                }
+            }
+            int lowestTop = this.minY;
+            int highestTop = this.maxY + 1;
+            if (heights != null) {
+                lowestTop = Integer.MAX_VALUE;
+                highestTop = Integer.MIN_VALUE;
+                for (int column = 0; column < 256; column++) {
+                    int top = heights.get(column) + this.minY;
+                    lowestTop = Math.min(lowestTop, top);
+                    highestTop = Math.max(highestTop, top);
+                }
+            }
+            int minSection = this.level.getMinSectionY();
+            int lowestBlocks = SectionPos.blockToSectionCoord(lowestTop - ChunkSummary.SCAN_DEPTH);
+            int highestBlocks = SectionPos.blockToSectionCoord(highestTop);
+            int lowestBiomes = SectionPos.blockToSectionCoord(lowestTop - 1);
+            PalettedContainerFactory factory = this.level.palettedContainerFactory();
+            LevelChunkSection[] sections = new LevelChunkSection[this.level.getSectionsCount()];
+            for (CompoundTag section : tag.getListOrEmpty("sections").compoundStream().toList()) {
+                int y = section.getByteOr("Y", (byte) 0);
+                if (y < lowestBlocks || y > highestBlocks || y - minSection < 0 || y - minSection >= sections.length) {
+                    continue;
+                }
+                Optional<CompoundTag> blockTag = section.getCompound("block_states");
+                if (blockTag.isEmpty()) {
+                    continue;
+                }
+                PalettedContainer<BlockState> blocks = factory.blockStatesContainerCodec().parse(NbtOps.INSTANCE, blockTag.get()).getPartialOrThrow();
+                PalettedContainerRO<Holder<Biome>> biomes = y >= lowestBiomes
+                    ? section.getCompound("biomes").map(biomeTag -> factory.biomeContainerCodec().parse(NbtOps.INSTANCE, biomeTag).getPartialOrThrow())
+                        .orElseGet(factory::createForBiomes)
+                    : factory.createForBiomes();
+                sections[y - minSection] = new LevelChunkSection(blocks, biomes);
+            }
+            return ChunkSummary.saved(sections, minSection, heights, this.minY, this.maxY);
+        }
+
         /** Reads a chunk from its region file. Chunks of another data version, not generated far enough or broken are skipped. */
         private @Nullable ChunkSummary readSaved(int chunkX, int chunkZ) {
             if (!RegionFiles.mayContain(this.level, chunkX, chunkZ)) {
@@ -203,27 +312,12 @@ final class DetailGenerator {
                 if (tag.isEmpty() || tag.get().getIntOr("DataVersion", -1) != SharedConstants.getCurrentVersion().dataVersion().version()) {
                     return null;
                 }
-                SerializableChunkData data = SerializableChunkData.parse(this.level, this.level.palettedContainerFactory(), tag.get());
-                if (data == null || !data.chunkStatus().isOrAfter(ChunkStatus.FEATURES)) {
-                    return null;
+                long start = ServerPerf.ON ? System.nanoTime() : 0L;
+                ChunkSummary summary = this.summarize(tag.get());
+                if (ServerPerf.ON) {
+                    ServerPerf.SAVED_CHUNKS.add(System.nanoTime() - start);
                 }
-                LevelChunkSection[] sections = new LevelChunkSection[this.level.getSectionsCount()];
-                for (SerializableChunkData.SectionData section : data.sectionData()) {
-                    int index = section.y() - this.level.getMinSectionY();
-                    if (index >= 0 && index < sections.length && section.chunkSection() != null) {
-                        sections[index] = section.chunkSection();
-                    }
-                }
-                SimpleBitStorage heights = null;
-                long[] raw = data.heightmaps().get(Heightmap.Types.WORLD_SURFACE);
-                if (raw != null) {
-                    try {
-                        heights = new SimpleBitStorage(Mth.ceillog2(this.level.getHeight() + 1), 256, raw);
-                    } catch (RuntimeException e) {
-                        heights = null;
-                    }
-                }
-                return ChunkSummary.saved(sections, this.level.getMinSectionY(), heights, this.minY, this.maxY);
+                return summary;
             } catch (RuntimeException e) {
                 LOGGER.debug("Could not read chunk {} {} for a detailed tile", chunkX, chunkZ, e);
                 return null;

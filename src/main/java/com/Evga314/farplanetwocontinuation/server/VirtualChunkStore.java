@@ -3,6 +3,8 @@ package com.Evga314.farplanetwocontinuation.server;
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain;
 import com.mojang.logging.LogUtils;
+import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
@@ -24,11 +26,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.Semaphore;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.InflaterInputStream;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -48,15 +50,24 @@ import org.slf4j.Logger;
 final class VirtualChunkStore {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAGIC = 0x46505643;
-    private static final int FORMAT = 7;
+    private static final int FORMAT = 15;
     private static final int REGION = VirtualTerrain.REGION;
-    /** About 1.6 MB per region in memory; everything else is read back from disk when needed. */
-    private static final int MEMORY_REGIONS = 12;
+    /**
+     * About 2 MB per region in memory, one region per 256 MB of heap (16 with 4 GB): enough for the regions around a player with a
+     * wide ring of detailed tiles. Everything else is read back from disk when needed.
+     */
+    private static final int MEMORY_REGIONS = (int) Math.clamp(Runtime.getRuntime().maxMemory() >> 28, 6L, 24L);
     private static final int MAX_FILE_SIZE = 4 * 1024 * 1024;
     private static final long BUSY_TICK_NANOS = 35_000_000L;
     private static final long WAIT_MS = 100L;
     /** Never wait longer than this in a row, so a server that is always busy still gets its distant terrain eventually. */
     private static final int MAX_WAITS = 50;
+    /**
+     * When at least this many chunks of a region are asked for at once (a detailed tile or more), the whole region is made. Every batch
+     * is generated with a margin around it, so a whole region costs about half as much per chunk as the chunks of a single tile, and
+     * the tiles around a requested one are almost always wanted right after it.
+     */
+    private static final int WHOLE_REGION = 16;
 
     private final Path root;
     private final long seed;
@@ -66,20 +77,34 @@ final class VirtualChunkStore {
             return this.size() > MEMORY_REGIONS;
         }
     };
-    /** One lock per region, so two threads never generate the same chunks. */
-    private final Map<Key, Object> locks = new HashMap<>();
+    /**
+     * Locks for regions, so two threads never generate the same chunks. A fixed set shared by hash: a lock per region would pile up
+     * while flying around, and two regions rarely share one.
+     */
+    private final Object[] locks = new Object[64];
+    /** Regions being generated right now. */
+    private final java.util.Set<Key> generating = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final Map<ResourceKey<Level>, @Nullable VirtualTerrain> terrains = new HashMap<>();
-    /** While rough terrain is still loading only one region is generated at a time, so the view fills up first. */
-    private final Semaphore roughFirst = new Semaphore(1);
-    private volatile boolean roughBusy;
 
     VirtualChunkStore(Path worldRoot, long seed) {
+        for (int i = 0; i < this.locks.length; i++) {
+            this.locks[i] = new Object();
+        }
         this.root = worldRoot.toAbsolutePath().normalize().resolve(FarPlaneConstants.MOD_ID).resolve("virtual").normalize();
         this.seed = seed;
     }
 
-    void setRoughBusy(boolean busy) {
-        this.roughBusy = busy;
+    /**
+     * Whether the region under a detailed tile is being generated right now. A tile started now would only wait for it, holding a
+     * thread that could make another region meanwhile.
+     */
+    boolean busy(Identifier dimension, com.Evga314.farplanetwocontinuation.tile.TilePos pos) {
+        if (this.generating.isEmpty()) {
+            return false;
+        }
+        int chunkX = (int) Math.floorDiv(pos.minX(), 16L);
+        int chunkZ = (int) Math.floorDiv(pos.minZ(), 16L);
+        return this.generating.contains(new Key(dimension, Math.floorDiv(chunkX, REGION), Math.floorDiv(chunkZ, REGION)));
     }
 
     /** Whether virtual chunks can be made in a level at all. */
@@ -88,8 +113,8 @@ final class VirtualChunkStore {
     }
 
     /**
-     * Summaries of chunks nobody has generated yet. Of every region only the rectangle around the chunks that are asked for and not
-     * made before is generated: around places players explored, most chunks are real and never need a virtual copy.
+     * Summaries of chunks nobody has generated yet. A few chunks at the edge of explored land are made on their own; where more are
+     * missing, the whole region is made at once, see {@link #WHOLE_REGION}.
      */
     Long2ObjectMap<ChunkSummary> chunks(ServerLevel level, LongCollection wanted) {
         Long2ObjectOpenHashMap<ChunkSummary> result = new Long2ObjectOpenHashMap<>();
@@ -120,11 +145,7 @@ final class VirtualChunkStore {
 
     /** One region with at least the wanted chunks made. Threads asking for the same region take turns, so nothing is made twice. */
     private ChunkSummary[] region(ServerLevel level, VirtualTerrain terrain, Key key, LongArrayList wanted) {
-        Object lock;
-        synchronized (this) {
-            lock = this.locks.computeIfAbsent(key, k -> new Object());
-        }
-        synchronized (lock) {
+        synchronized (this.locks[(key.hashCode() & Integer.MAX_VALUE) % this.locks.length]) {
             ChunkSummary[] region;
             synchronized (this) {
                 region = this.memory.get(key);
@@ -139,27 +160,35 @@ final class VirtualChunkStore {
             int minZ = Integer.MAX_VALUE;
             int maxX = Integer.MIN_VALUE;
             int maxZ = Integer.MIN_VALUE;
+            int missing = 0;
             for (long chunk : wanted) {
                 if (region[index(chunk)] == null) {
                     minX = Math.min(minX, ChunkPos.getX(chunk));
                     minZ = Math.min(minZ, ChunkPos.getZ(chunk));
                     maxX = Math.max(maxX, ChunkPos.getX(chunk));
                     maxZ = Math.max(maxZ, ChunkPos.getZ(chunk));
+                    missing++;
                 }
+            }
+            if (missing >= WHOLE_REGION) {
+                minX = key.x * REGION;
+                minZ = key.z * REGION;
+                maxX = minX + REGION - 1;
+                maxZ = minZ + REGION - 1;
             }
             if (minX <= maxX) {
                 waitForServer(level);
-                boolean gated = this.roughBusy;
-                if (gated) {
-                    this.roughFirst.acquireUninterruptibly();
-                }
+                long start = ServerPerf.ON ? System.nanoTime() : 0L;
                 ProtoChunk[] made;
+                this.generating.add(key);
                 try {
                     made = terrain.generate(minX, minZ, maxX - minX + 1, maxZ - minZ + 1);
                 } finally {
-                    if (gated) {
-                        this.roughFirst.release();
-                    }
+                    this.generating.remove(key);
+                }
+                if (ServerPerf.ON) {
+                    ServerPerf.VIRTUAL_REGIONS.add(System.nanoTime() - start);
+                    ServerPerf.VIRTUAL_CHUNKS.addAndGet(made.length);
                 }
                 region = region.clone();
                 int width = maxX - minX + 1;
@@ -196,9 +225,23 @@ final class VirtualChunkStore {
         return this.terrains.computeIfAbsent(level.dimension(), dimension -> VirtualTerrain.create(level));
     }
 
+    /** Forgets everything kept in memory; the files stay. */
     synchronized void clear() {
         this.memory.clear();
-        this.locks.clear();
+    }
+
+    /** Forgets the generated chunks of one dimension, in memory and on disk. Deleting the files can take a while. */
+    void clear(Identifier dimension) {
+        synchronized (this) {
+            this.memory.keySet().removeIf(key -> key.dimension.equals(dimension));
+        }
+        TileDiskCache.deleteTree(this.root.resolve(sanitize(dimension.getNamespace() + "_" + dimension.getPath())).normalize(), this.root);
+    }
+
+    /** Whether chunks of a region were generated before and are kept on disk, so they are only read, not generated. */
+    boolean hasStored(ServerLevel level, int regionX, int regionZ) {
+        Path file = this.file(new Key(level.dimension().identifier(), regionX, regionZ));
+        return file != null && Files.isRegularFile(file);
     }
 
     private @Nullable Path file(Key key) {
@@ -244,6 +287,18 @@ final class VirtualChunkStore {
                     }
                     palette.add(biome);
                 }
+                int blockCount = in.readUnsignedShort();
+                int[] blocks = new int[blockCount];
+                for (int i = 0; i < blockCount; i++) {
+                    byte[] text = new byte[in.readUnsignedShort()];
+                    in.readFully(text);
+                    Identifier id = Identifier.tryParse(new String(text, StandardCharsets.UTF_8));
+                    // A block that no longer exists (a removed mod) makes the whole region stale.
+                    if (id == null || !BuiltInRegistries.BLOCK.containsKey(id)) {
+                        return null;
+                    }
+                    blocks[i] = BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.getValue(id));
+                }
                 long[] present = new long[REGION * REGION / 64];
                 for (int i = 0; i < present.length; i++) {
                     present[i] = in.readLong();
@@ -251,7 +306,7 @@ final class VirtualChunkStore {
                 ChunkSummary[] summaries = new ChunkSummary[REGION * REGION];
                 for (int i = 0; i < summaries.length; i++) {
                     if ((present[i >> 6] & 1L << (i & 63)) != 0) {
-                        summaries[i] = ChunkSummary.read(in, palette, level.getMinY(), level.getMaxY());
+                        summaries[i] = ChunkSummary.read(in, palette, blocks, level.getMinY(), level.getMaxY());
                     }
                 }
                 return summaries;
@@ -281,6 +336,18 @@ final class VirtualChunkStore {
                     }
                 });
             }
+            Int2IntOpenHashMap blockPalette = new Int2IntOpenHashMap();
+            IntArrayList blocks = new IntArrayList();
+            for (ChunkSummary summary : summaries) {
+                if (summary != null) {
+                    summary.collectBlocks(block -> {
+                        if (!blockPalette.containsKey(block)) {
+                            blockPalette.put(block, blocks.size());
+                            blocks.add(block);
+                        }
+                    });
+                }
+            }
             ByteArrayOutputStream bytes = new ByteArrayOutputStream(64 * 1024);
             DataOutputStream header = new DataOutputStream(bytes);
             header.writeInt(MAGIC);
@@ -291,6 +358,12 @@ final class VirtualChunkStore {
                 out.writeShort(ordered.size());
                 for (Holder<Biome> biome : ordered) {
                     byte[] text = biome.unwrapKey().orElseThrow().identifier().toString().getBytes(StandardCharsets.UTF_8);
+                    out.writeShort(text.length);
+                    out.write(text);
+                }
+                out.writeShort(blocks.size());
+                for (int block : blocks) {
+                    byte[] text = BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(block)).toString().getBytes(StandardCharsets.UTF_8);
                     out.writeShort(text.length);
                     out.write(text);
                 }
@@ -305,7 +378,7 @@ final class VirtualChunkStore {
                 }
                 for (ChunkSummary summary : summaries) {
                     if (summary != null) {
-                        summary.write(out, palette);
+                        summary.write(out, palette, blockPalette);
                     }
                 }
             }

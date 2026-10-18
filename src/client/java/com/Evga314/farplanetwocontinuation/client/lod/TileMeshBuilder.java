@@ -34,30 +34,45 @@ public final class TileMeshBuilder {
     private static final int MAX_HEIGHT = 8192;
 
     static final float WATER_SHADE = 0.92F;
-    private static final float LIGHT_X = 0.35F;
-    private static final float LIGHT_Y = 0.85F;
-    private static final float LIGHT_Z = 0.4F;
+    /**
+     * Tree tops are stored in the alpha of a vertex as 255 minus their height in quarter blocks, so the shader can lay them flat inside
+     * the detailed terrain and vanilla's chunks. Alpha 0 stays the mark of the void.
+     */
+    private static final float CANOPY_UNITS = 4.0F;
+    private static final float MAX_CANOPY = 30.0F;
+    /** Vanilla's shades of block faces, the same ones detailed tiles use. */
+    private static final float SHADE_TOP = 1.0F;
+    private static final float SHADE_NORTH_SOUTH = 0.8F;
+    private static final float SHADE_EAST_WEST = 0.6F;
 
     private TileMeshBuilder() {
     }
 
     public record Built(
         long key, int epoch, @Nullable ByteBuffer vertices, float minY, float maxY, float terrainMinY, short @Nullable [] heights, int indexCount,
-        boolean detail, long coverage, boolean complete, int @Nullable [] chunkQuads
+        boolean detail, long coverage, boolean complete, int @Nullable [] chunkQuads, int @Nullable [] chunkSurfaces, boolean textured,
+        boolean hasWater, int @Nullable [] chunkPlants
     ) {
         /** A tile whose data could not be used; it is dropped quietly. */
         static Built failed(long key, int epoch) {
-            return new Built(key, epoch, null, 0.0F, 0.0F, 0.0F, null, 0, false, 0L, false, null);
+            return new Built(key, epoch, null, 0.0F, 0.0F, 0.0F, null, 0, false, 0L, false, null, null, false, false, null);
         }
     }
 
-    public static Built build(long key, int epoch, TileData data, List<@Nullable Holder<Biome>> biomes, int seaLevel) {
+    /**
+     * @param floating islands over the void (the End): the skirts that close the gaps between tiles of different detail would hang
+     *                 under every island edge like curtains there, so they are left out
+     */
+    public static Built build(long key, int epoch, TileData data, List<@Nullable Holder<Biome>> biomes, int seaLevel, boolean floating) {
         TilePos pos = TilePos.unpack(key);
         int spacing = 1 << pos.level();
         long baseX = pos.minX();
         long baseZ = pos.minZ();
         ByteBuffer buffer = ByteBuffer.allocateDirect(VERTEX_COUNT * VERTEX_SIZE).order(ByteOrder.nativeOrder());
         int[] colors = new int[GRID_VERTICES];
+        int[] alphas = new int[GRID_VERTICES];
+        // Surface heights with the tree tops on them.
+        float[] tops = new float[GRID_VERTICES];
         BlockPos.MutableBlockPos scratch = new BlockPos.MutableBlockPos();
 
         float minY = Float.MAX_VALUE;
@@ -66,48 +81,69 @@ public final class TileMeshBuilder {
             for (int x = 0; x < S; x++) {
                 int index = x + z * S;
                 float height = height(data, index);
-                minY = Math.min(minY, height);
-                maxY = Math.max(maxY, height);
 
                 float dx = (sample(data, x + 1, z) - sample(data, x - 1, z)) / (2.0F * spacing);
                 float dz = (sample(data, x, z + 1) - sample(data, x, z - 1)) / (2.0F * spacing);
                 float slope = Mth.sqrt(dx * dx + dz * dz);
                 int flags = data.flags[index];
+                alphas[index] = (flags & TileData.FLAG_VOID) != 0 ? 0 : 255;
                 boolean water = (flags & TileData.FLAG_WATER) != 0;
                 boolean lava = (flags & TileData.FLAG_LAVA) != 0;
                 Holder<Biome> biome = biomes.get(data.biomes[index] & 0xFF);
                 int worldX = (int) Mth.clamp(baseX + (long) x * spacing, -FarPlaneConstants.WORLD_LIMIT, FarPlaneConstants.WORLD_LIMIT);
                 int worldZ = (int) Mth.clamp(baseZ + (long) z * spacing, -FarPlaneConstants.WORLD_LIMIT, FarPlaneConstants.WORLD_LIMIT);
-                float length = Mth.sqrt(dx * dx + 1.0F + dz * dz);
-                float lambert = (-dx * LIGHT_X + LIGHT_Y - dz * LIGHT_Z) / length;
-                float landShade = 0.55F + 0.45F * Mth.clamp(lambert, 0.0F, 1.0F);
+                // Shaded like vanilla's blocks: a slope is a staircase of block tops and sides, and every side gets vanilla's shade of
+                // its direction, so the distant terrain matches the blocks next to it.
+                float stepsX = Math.abs(dx);
+                float stepsZ = Math.abs(dz);
+                float area = 1.0F + stepsX + stepsZ;
+                float sides = water ? 0.0F : (stepsX + stepsZ) / area;
+                float landShade = (SHADE_TOP + stepsZ * SHADE_NORTH_SOUTH + stepsX * SHADE_EAST_WEST) / area;
                 if (data.subBiomes != null) {
-                    colors[index] = averagedColor(data, index, biomes, worldX, (int) height, worldZ, slope, landShade, seaLevel, scratch);
+                    colors[index] = averagedColor(data, index, biomes, worldX, (int) height, worldZ, slope, sides, landShade, seaLevel, scratch);
                 } else {
-                    int color = TileColors.color(biome, worldX, (int) height, worldZ, water, lava, water ? 0.0F : slope, seaLevel, scratch);
+                    int color = TileColors.color(biome, worldX, (int) height, worldZ, water, lava, water ? 0.0F : slope, sides, seaLevel, scratch);
                     colors[index] = ARGB.scaleRGB(color, water || lava ? WATER_SHADE : landShade);
                 }
-                putVertex(buffer, localCoordinate(baseX, x, spacing), height, localCoordinate(baseZ, z, spacing), colors[index]);
+                Canopy.Kind trees = lava || alphas[index] == 0 || slope > 1.4F || biome == null ? null : Canopy.of(biome);
+                if (trees != null && (!water || trees.overWater())) {
+                    float canopy = Canopy.height(trees, worldX, worldZ, spacing);
+                    if (canopy > 0.5F) {
+                        scratch.set(worldX, (int) (height + canopy), worldZ);
+                        boolean snowy = biome.value().coldEnoughToSnow(scratch, seaLevel);
+                        int leaves = ARGB.scaleRGB(Canopy.color(trees, biome, worldX, (int) (height + canopy), worldZ, snowy), landShade);
+                        // Coarse samples stand for trees and the ground between them.
+                        colors[index] = spacing >= 16 ? ARGB.srgbLerp(trees.density(), colors[index], leaves) : leaves;
+                        canopy = Math.min(canopy, MAX_CANOPY);
+                        height += canopy;
+                        alphas[index] = 255 - Math.round(canopy * CANOPY_UNITS);
+                    }
+                }
+                tops[index] = height;
+                minY = Math.min(minY, height);
+                maxY = Math.max(maxY, height);
+                putVertex(buffer, localCoordinate(baseX, x, spacing), height, localCoordinate(baseZ, z, spacing), colors[index], alphas[index]);
             }
         }
 
-        float skirtDepth = Mth.clamp(spacing * 4.0F, 8.0F, 512.0F);
+        float skirtDepth = floating ? 0.0F : Mth.clamp(spacing * 4.0F, 8.0F, 512.0F);
         for (int edge = 0; edge < 4; edge++) {
             for (int i = 0; i < S; i++) {
                 int x = edgeX(edge, i);
                 int z = edgeZ(edge, i);
                 int index = x + z * S;
-                putVertex(buffer, localCoordinate(baseX, x, spacing), height(data, index) - skirtDepth, localCoordinate(baseZ, z, spacing), colors[index]);
+                putVertex(buffer, localCoordinate(baseX, x, spacing), tops[index] - skirtDepth, localCoordinate(baseZ, z, spacing), colors[index],
+                    floating ? 0 : alphas[index]);
             }
         }
         buffer.flip();
-        return new Built(key, epoch, buffer, minY - skirtDepth, maxY, minY, data.heights.clone(), INDEX_COUNT, false, 0L, true, null);
+        return new Built(key, epoch, buffer, minY - skirtDepth, maxY, minY, data.heights.clone(), INDEX_COUNT, false, 0L, true, null, null, false, false, null);
     }
 
     /** Box filter over the sub-samples of a coarse cell, so a cell that is 30% islands looks like a slightly greener sea. */
     private static int averagedColor(
-        TileData data, int index, List<@Nullable Holder<Biome>> biomes, int x, int height, int z, float slope, float landShade, int seaLevel,
-        BlockPos.MutableBlockPos scratch
+        TileData data, int index, List<@Nullable Holder<Biome>> biomes, int x, int height, int z, float slope, float sides, float landShade,
+        int seaLevel, BlockPos.MutableBlockPos scratch
     ) {
         int mask = data.subWater[index];
         int red = 0;
@@ -116,7 +152,7 @@ public final class TileMeshBuilder {
         for (int i = 0; i < TileData.SUB_SAMPLES; i++) {
             boolean water = (mask & 1 << i) != 0;
             Holder<Biome> biome = biomes.get(data.subBiomes[index * TileData.SUB_SAMPLES + i] & 0xFF);
-            int color = TileColors.color(biome, x, height, z, water, false, water ? 0.0F : slope, seaLevel, scratch);
+            int color = TileColors.color(biome, x, height, z, water, false, water ? 0.0F : slope, water ? 0.0F : sides, seaLevel, scratch);
             color = ARGB.scaleRGB(color, water ? WATER_SHADE : landShade);
             red += ARGB.red(color);
             green += ARGB.green(color);
@@ -156,9 +192,10 @@ public final class TileMeshBuilder {
         return Mth.clamp(data.heights[index], MIN_HEIGHT, MAX_HEIGHT);
     }
 
-    private static void putVertex(ByteBuffer buffer, float x, float y, float z, int argb) {
+    /** Alpha 0 marks the void; the shader drops everything closer to a void sample than to land. */
+    private static void putVertex(ByteBuffer buffer, float x, float y, float z, int argb, int alpha) {
         buffer.putFloat(x).putFloat(y).putFloat(z);
-        buffer.put((byte) ARGB.red(argb)).put((byte) ARGB.green(argb)).put((byte) ARGB.blue(argb)).put((byte) 255);
+        buffer.put((byte) ARGB.red(argb)).put((byte) ARGB.green(argb)).put((byte) ARGB.blue(argb)).put((byte) alpha);
     }
 
     /** The same index list is shared by every tile because all tiles have the same topology. */

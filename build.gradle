@@ -3,7 +3,9 @@ plugins {
     id 'maven-publish'
 }
 
-version = project.mod_version
+// ./gradlew build -Pdebug_build makes the debug jar, which writes detailed performance logs (see FarPlaneDebug).
+def debugBuild = project.hasProperty('debug_build')
+version = project.mod_version + (debugBuild ? '-debug' : '')
 group = project.maven_group
 
 base {
@@ -67,6 +69,10 @@ processResources {
     inputs.property "version", project.version
     inputs.property "minecraft_version", project.minecraft_version
     inputs.property "loader_version", project.loader_version
+    inputs.property "debug_build", debugBuild
+    if (!debugBuild) {
+        exclude "farplanetwocontinuation-debug.marker"
+    }
     filteringCharset "UTF-8"
 
     filesMatching("fabric.mod.json") {

@@ -16,9 +16,9 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Notes chunks where a block changed on the server, so the detailed LOD tiles over them are built again. Changes that look the same
- * from above (crops growing, redstone switching, water flowing) and blocks world generation places while it finishes a fresh chunk
- * are skipped, they would only cause needless reloading.
+ * Notes chunks where a block was replaced by another one on the server, so the detailed LOD tiles over them are built again. Changes
+ * of the same block (crops growing, redstone switching, water flowing) and blocks world generation places while it finishes a fresh
+ * chunk are skipped, they would only cause needless reloading.
  */
 @Mixin(LevelChunk.class)
 public abstract class LevelChunkMixin {
@@ -33,7 +33,7 @@ public abstract class LevelChunkMixin {
         if (old == null || (flags & Block.UPDATE_KNOWN_SHAPE) != 0 || !(this.level instanceof ServerLevel)) {
             return;
         }
-        if (old.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO) != state.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)) {
+        if (old.getBlock() != state.getBlock()) {
             DirtyChunks.mark(this.level.dimension(), pos.getX() >> 4, pos.getZ() >> 4);
         }
     }

@@ -1,7 +1,6 @@
 package com.Evga314.farplanetwocontinuation.client;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
-import com.Evga314.farplanetwocontinuation.client.lod.TileMeshBuilder;
 import java.util.Locale;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
@@ -34,62 +33,29 @@ public class LodConfigScreen extends OptionsSubScreen {
         OptionInstance<Boolean> enabled = OptionInstance.createBoolean(
             PREFIX + "enabled", OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "enabled.tooltip")), config.enabled, value -> config.enabled = value
         );
-        OptionInstance<Integer> distance = new OptionInstance<>(
-            PREFIX + "distance",
-            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "distance.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.translatable(PREFIX + "blocks", formatNumber(sliderToDistance(value)))),
-            new OptionInstance.IntRange(0, DISTANCE_STEPS),
-            distanceToSlider(config.lodDistance),
-            value -> config.lodDistance = sliderToDistance(value)
+        OptionInstance<Integer> loadSpeed = new OptionInstance<>(
+            PREFIX + "load_speed",
+            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "load_speed.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, Component.translatable(PREFIX + "load_speed." + value)),
+            new OptionInstance.IntRange(0, LoadSpeed.values().length - 1),
+            LoadSpeed.of(config.loadSpeed).ordinal(),
+            value -> config.loadSpeed = value
         );
-        OptionInstance<Integer> detail = new OptionInstance<>(
-            PREFIX + "detail",
-            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "detail.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.translatable(PREFIX + "detail.level." + value)),
-            new OptionInstance.IntRange(0, FarPlaneConstants.MAX_MIN_LEVEL),
-            config.detailLevel,
-            value -> config.detailLevel = value
-        );
-        OptionInstance<Integer> quality = new OptionInstance<>(
-            PREFIX + "quality",
-            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "quality.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.literal(String.format(Locale.ROOT, "%.1f", value / 10.0F))),
-            new OptionInstance.IntRange(10, 60),
-            Mth.clamp(Math.round(config.quality * 10.0F), 10, 60),
-            value -> config.quality = value / 10.0F
-        );
-        long tileBytes = (long) TileMeshBuilder.VERTEX_COUNT * TileMeshBuilder.VERTEX_SIZE;
-        OptionInstance<Integer> memory = new OptionInstance<>(
-            PREFIX + "memory",
-            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "memory.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.translatable(PREFIX + "memory.value", GpuMemory.STEPS_MB[value])),
-            new OptionInstance.IntRange(0, GpuMemory.STEPS_MB.length - 1),
-            GpuMemory.step((int) (config.maxGpuTiles * tileBytes / (1024 * 1024))),
-            value -> config.maxGpuTiles = (int) (GpuMemory.STEPS_MB[value] * 1024L * 1024L / tileBytes)
-        );
-        OptionInstance<Integer> fog = new OptionInstance<>(
-            PREFIX + "fog",
-            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "fog.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + "%")),
-            new OptionInstance.IntRange(10, 98),
-            Mth.clamp(Math.round(config.fogStart * 100.0F), 10, 98),
-            value -> config.fogStart = value / 100.0F
-        );
-        OptionInstance<Boolean> noFog = OptionInstance.createBoolean(
-            PREFIX + "no_fog", OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "no_fog.tooltip")), config.disableFog, value -> config.disableFog = value
-        );
-
         this.list.addBig(enabled);
-        this.list.addBig(distance);
-        this.list.addSmall(detail, quality);
-        this.list.addSmall(memory, fog);
-        this.list.addBig(noFog);
-        this.list.addBig(Button.builder(Component.translatable(PREFIX + "detail_settings"), button -> {
-            if (this.minecraft != null) {
-                this.minecraft.gui.setScreen(new DetailConfigScreen(this));
-            }
-        }).build());
+        this.list.addBig(loadSpeed);
+        this.list.addBig(Button.builder(Component.translatable(PREFIX + "distant_settings"), button -> this.open(new DimensionChoiceScreen(
+            this, Component.translatable(PREFIX + "distant.title"), DistantConfigScreen::new
+        ))).build());
+        this.list.addBig(Button.builder(Component.translatable(PREFIX + "detail_settings"), button -> this.open(new DimensionChoiceScreen(
+            this, Component.translatable(PREFIX + "detailed.title"), DetailConfigScreen::new
+        ))).build());
         this.list.addBig(Button.builder(Component.translatable(PREFIX + "clear_cache"), button -> this.confirmClearCache()).build());
+    }
+
+    private void open(Screen screen) {
+        if (this.minecraft != null) {
+            this.minecraft.gui.setScreen(screen);
+        }
     }
 
     private void confirmClearCache() {

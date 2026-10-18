@@ -35,6 +35,11 @@ public final class ConfigFiles {
         return file;
     }
 
+    /** The settings as JSON on one line, for logs. */
+    public static String toCompactJson(Object value) {
+        return new Gson().toJson(value);
+    }
+
     public static <T> T load(String fileName, Class<T> type, Supplier<T> defaults) {
         Path file = resolve(fileName);
         if (Files.isRegularFile(file)) {

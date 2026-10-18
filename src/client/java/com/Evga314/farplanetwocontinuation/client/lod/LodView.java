@@ -2,6 +2,7 @@ package com.Evga314.farplanetwocontinuation.client.lod;
 
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
+import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.ViewArea;
@@ -20,6 +21,7 @@ import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3fc;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Camera and vanilla render state for one client tick, shared by both LOD layers. Answers whether vanilla already draws an area,
@@ -30,8 +32,12 @@ final class LodView {
     private static final int[] SURFACE_PROBES = {0, 0, 15, 0, 0, 15, 15, 15, 8, 8};
 
     private final Minecraft minecraft;
+    /** Position of the section looked up; only used on the client thread. */
+    private final BlockPos.MutableBlockPos scratch = new BlockPos.MutableBlockPos();
     /** Per-tick cache of whether vanilla already draws a chunk: 1 yes, -1 no. */
     private final Long2ByteOpenHashMap chunkStates = new Long2ByteOpenHashMap();
+    /** Sections vanilla has on screen, gathered once per tick when first needed. */
+    private @Nullable ReferenceOpenHashSet<SectionRenderDispatcher.RenderSection> visibleSections;
     double camX;
     double camY;
     double camZ;
@@ -40,8 +46,16 @@ final class LodView {
     double lookZ;
     double vanillaRadius;
     double vanillaDepthFar;
+    /**
+     * How many pixels a block at a distance takes on this screen, against a 1080 pixels high window with a field of view of 70: tiles
+     * get finer on bigger screens and with a narrower view. They never get coarser than on that screen.
+     */
+    double screenScale = 1.0;
     int worldMinY;
     int worldMaxY;
+
+    /** Pixels per block at a distance of one block on a 1080 pixels high window with a field of view of 70. */
+    private static final double REFERENCE_FOCAL = 540.0 / Math.tan(Math.toRadians(35.0));
 
     LodView(Minecraft minecraft) {
         this.minecraft = minecraft;
@@ -59,9 +73,13 @@ final class LodView {
         int renderDistance = this.minecraft.options.getEffectiveRenderDistance();
         this.vanillaRadius = Math.max(0, renderDistance - 1) * 16.0;
         this.vanillaDepthFar = 0.9 * Math.max(renderDistance * 16.0 * 4.0, this.minecraft.options.cloudRange().get() * 16.0);
+        int height = Mth.clamp(this.minecraft.getWindow().getHeight(), 480, 1600);
+        double fov = Math.toRadians(Mth.clamp(this.minecraft.options.fov().get(), 30, 110));
+        this.screenScale = Math.max(1.0, height * 0.5 / Math.tan(fov * 0.5) / REFERENCE_FOCAL);
         this.worldMinY = level.getMinY();
         this.worldMaxY = level.getMaxY() + 1;
         this.chunkStates.clear();
+        this.visibleSections = null;
     }
 
     /** Vertical distance to the whole build height, used when nothing better is known about a tile. */
@@ -152,10 +170,100 @@ final class LodView {
         if (high <= this.worldMinY) {
             return true;
         }
+        return this.sectionsDrawn(sodium, viewArea, chunkX, chunkZ, Math.max(low, this.worldMinY + 1) - 1, high - 1);
+    }
+
+    /** How much of what a detailed tile has in a chunk vanilla draws itself. */
+    enum Coverage {
+        /** Nothing, or not yet: the tile draws all of the chunk. */
+        NONE,
+        /** Only some sections, see {@link #drawnSections} and {@link #lowestSection}. */
+        PARTIAL,
+        /** All of it: the tile leaves the chunk out. */
+        FULL
+    }
+
+    /** Sections the last {@link #coverage} found drawn by vanilla, one bit each from {@link #lowestSection} up. */
+    int drawnSections;
+    int lowestSection;
+
+    /**
+     * Whether vanilla draws the blocks of a chunk between two heights, the ones a detailed tile shows there, section by section.
+     * Vanilla draws sections up to its render distance above and below the camera, and builds only those it can see: seen from high
+     * up, an End city is drawn but the island under it is not; the ground under water may be out of reach while the water is drawn.
+     * The tile keeps such a chunk and leaves out exactly the sections vanilla has built.
+     */
+    Coverage coverage(int chunkX, int chunkZ, int lowY, int highY) {
+        this.drawnSections = 0;
+        this.lowestSection = 0;
+        if (lowY > highY) {
+            return Coverage.FULL;
+        }
+        ClientLevel level = this.minecraft.level;
+        Object sodium = SodiumCompat.isActive() ? SodiumCompat.renderer() : null;
+        ViewArea viewArea = sodium == null ? this.minecraft.levelRenderer.viewArea() : null;
+        if (level == null || sodium == null && viewArea == null) {
+            return Coverage.NONE;
+        }
+        int cameraChunkX = SectionPos.blockToSectionCoord(Mth.floor(this.camX));
+        int cameraChunkZ = SectionPos.blockToSectionCoord(Mth.floor(this.camZ));
+        if (viewArea != null && !ChunkTrackingView.isInViewDistance(cameraChunkX, cameraChunkZ, viewArea.getViewDistance(), chunkX, chunkZ)) {
+            return Coverage.NONE;
+        }
+        ChunkAccess chunk = level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        if (!(chunk instanceof LevelChunk) || chunk instanceof EmptyLevelChunk) {
+            return Coverage.NONE;
+        }
         int cameraSection = SectionPos.blockToSectionCoord(Mth.floor(this.camY));
-        int lowSection = SectionPos.blockToSectionCoord(Mth.clamp(Math.max(low, this.worldMinY + 1) - 1, this.worldMinY, this.worldMaxY - 1));
-        int highSection = SectionPos.blockToSectionCoord(Mth.clamp(high - 1, this.worldMinY, this.worldMaxY - 1));
-        // Every section from the lowest ground to the highest top has to be drawn by vanilla, or hiding the LOD leaves a hole.
+        int lowSection = SectionPos.blockToSectionCoord(Mth.clamp(lowY, this.worldMinY, this.worldMaxY - 1));
+        int highSection = Math.min(SectionPos.blockToSectionCoord(Mth.clamp(highY, this.worldMinY, this.worldMaxY - 1)), lowSection + 23);
+        int mask = 0;
+        boolean all = true;
+        for (int sectionY = lowSection; sectionY <= highSection; sectionY++) {
+            boolean drawn = sodium != null
+                ? this.sodiumSectionDrawn(sodium, chunkX, chunkZ, sectionY)
+                : this.sectionBuilt(viewArea, cameraSection, chunkX, chunkZ, sectionY, sectionY == highSection);
+            if (drawn) {
+                mask |= 1 << (sectionY - lowSection);
+            } else {
+                all = false;
+            }
+        }
+        this.drawnSections = mask;
+        this.lowestSection = lowSection;
+        return all ? Coverage.FULL : mask != 0 ? Coverage.PARTIAL : Coverage.NONE;
+    }
+
+    /** Whether vanilla has built a section within its reach; the top section must also have something in it. */
+    private boolean sectionBuilt(ViewArea viewArea, int cameraSection, int chunkX, int chunkZ, int sectionY, boolean mustHaveBlocks) {
+        if (Math.abs(sectionY - cameraSection) > viewArea.getViewDistance()) {
+            return false;
+        }
+        SectionRenderDispatcher.RenderSection section = viewArea.getRenderSectionAt(this.scratch.set(chunkX * 16 + 8, sectionY * 16 + 8, chunkZ * 16 + 8));
+        if (section == null) {
+            return false;
+        }
+        SectionMesh mesh = section.sectionMesh.get();
+        return mesh != CompiledSectionMesh.UNCOMPILED && (!mustHaveBlocks || mesh != CompiledSectionMesh.EMPTY);
+    }
+
+    /**
+     * Whether a section is within Sodium's render distance: its middle inside the circle of the render distance around the camera, and
+     * no farther above or below than that. Sodium culls sections past it, built or not.
+     */
+    private boolean sodiumInReach(int chunkX, int chunkZ, int sectionY) {
+        double limit = this.minecraft.options.getEffectiveRenderDistance() * 16.0;
+        double dx = chunkX * 16.0 + 8.0 - this.camX;
+        double dz = chunkZ * 16.0 + 8.0 - this.camZ;
+        double dy = sectionY * 16.0 + 8.0 - this.camY;
+        return dx * dx + dz * dz <= (limit - 8.0) * (limit - 8.0) && Math.abs(dy) <= limit;
+    }
+
+    /** Every section from the lowest to the highest block has to be drawn by vanilla, or hiding the LOD leaves a hole. */
+    private boolean sectionsDrawn(@Nullable Object sodium, @Nullable ViewArea viewArea, int chunkX, int chunkZ, int lowY, int highY) {
+        int cameraSection = SectionPos.blockToSectionCoord(Mth.floor(this.camY));
+        int lowSection = SectionPos.blockToSectionCoord(Mth.clamp(lowY, this.worldMinY, this.worldMaxY - 1));
+        int highSection = SectionPos.blockToSectionCoord(Mth.clamp(highY, this.worldMinY, this.worldMaxY - 1));
         for (int sectionY = lowSection; sectionY <= highSection; sectionY++) {
             boolean drawn = sodium != null
                 ? this.sodiumSectionDrawn(sodium, chunkX, chunkZ, sectionY)
@@ -168,31 +276,46 @@ final class LodView {
     }
 
     /**
-     * Whether Sodium draws a section: built, and all of it well inside the render distance around the camera. Sodium culls by its own
-     * distance rules, so the check stays on the safe side; where it says no, the LOD terrain just stays under Sodium's blocks.
+     * Whether Sodium draws a section when it is in view: built and within its render distance. Sodium has no way to ask which
+     * sections it has on screen, so a built section counts as drawn.
      */
     private boolean sodiumSectionDrawn(Object sodium, int chunkX, int chunkZ, int sectionY) {
-        double limit = Math.max(0, this.minecraft.options.getEffectiveRenderDistance() - 1) * 16.0;
-        double dx = Math.max(Math.abs(chunkX * 16.0 - this.camX), Math.abs(chunkX * 16.0 + 16.0 - this.camX));
-        double dy = Math.max(Math.abs(sectionY * 16.0 - this.camY), Math.abs(sectionY * 16.0 + 16.0 - this.camY));
-        double dz = Math.max(Math.abs(chunkZ * 16.0 - this.camZ), Math.abs(chunkZ * 16.0 + 16.0 - this.camZ));
-        if (dx * dx + dy * dy + dz * dz > limit * limit) {
-            return false;
-        }
-        return SodiumCompat.isSectionReady(sodium, chunkX, sectionY, chunkZ);
+        return this.sodiumInReach(chunkX, chunkZ, sectionY) && SodiumCompat.isSectionReady(sodium, chunkX, sectionY, chunkZ);
     }
 
-    /** Whether vanilla draws a section: close enough in height and built. The top section must also have something in it. */
+    /**
+     * Whether vanilla takes care of a section: close enough in height and built, the top section also with something in it. Vanilla
+     * only builds sections it can see from the camera, through air; a section that cannot be seen at all is never built, and needs
+     * nothing drawn in its place either. Only sections vanilla can see but has not built yet are left to the LOD.
+     */
     private boolean sectionDrawn(ViewArea viewArea, int cameraSection, int chunkX, int chunkZ, int sectionY, boolean mustHaveBlocks) {
         if (Math.abs(sectionY - cameraSection) > viewArea.getViewDistance()) {
             return false;
         }
-        SectionRenderDispatcher.RenderSection section = viewArea.getRenderSectionAt(new BlockPos(chunkX * 16 + 8, sectionY * 16 + 8, chunkZ * 16 + 8));
+        SectionRenderDispatcher.RenderSection section = viewArea.getRenderSectionAt(this.scratch.set(chunkX * 16 + 8, sectionY * 16 + 8, chunkZ * 16 + 8));
         if (section == null) {
             return false;
         }
         SectionMesh mesh = section.sectionMesh.get();
-        return mesh != CompiledSectionMesh.UNCOMPILED && (!mustHaveBlocks || mesh != CompiledSectionMesh.EMPTY);
+        if (mesh == CompiledSectionMesh.UNCOMPILED) {
+            return !this.seenByVanilla(section);
+        }
+        return !mustHaveBlocks || mesh != CompiledSectionMesh.EMPTY;
+    }
+
+    /**
+     * Whether vanilla has a section on screen this frame: in view and not hidden behind other blocks. Vanilla builds those first; the
+     * others it builds only once they come into view, until then nobody sees them.
+     */
+    private boolean seenByVanilla(SectionRenderDispatcher.RenderSection section) {
+        if (this.visibleSections == null) {
+            try {
+                this.visibleSections = new ReferenceOpenHashSet<>(this.minecraft.levelRenderer.visibleSections());
+            } catch (RuntimeException e) {
+                return true;
+            }
+        }
+        return this.visibleSections.contains(section);
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.Evga314.farplanetwocontinuation.server.virtual;
 
+import com.Evga314.farplanetwocontinuation.WorkThrottle;
 import com.Evga314.farplanetwocontinuation.mixin.common.ChunkGeneratorAccess;
 import com.Evga314.farplanetwocontinuation.mixin.common.NoiseBasedChunkGeneratorAccess;
 import com.mojang.logging.LogUtils;
@@ -113,6 +114,12 @@ public final class VirtualTerrain {
     private static final ThreadLocal<Boolean> BUILDING_SURFACE = ThreadLocal.withInitial(() -> false);
     private static final int BAND_ABOVE = 80;
     /**
+     * Terrain noise, the most expensive part, is only filled this far above the estimate at first; biomes keep the full band, trees
+     * and snow need them up there. Measured, the real surface stays 40 or more blocks below the full band. Where the ground still
+     * reaches the top of the filled part (jagged peaks), the rest up to the top of the world is filled as well.
+     */
+    private static final int NOISE_BELOW_BAND_TOP = 32;
+    /**
      * Terrain of recently built chunks. Every region also builds the terrain of a margin around it, which is the inside of its
      * neighbours, so without this most chunks would be built two or three times. About 30 KB per chunk.
      */
@@ -222,15 +229,16 @@ public final class VirtualTerrain {
             for (int x = 1; x < sizeX - 1; x++) {
                 int index = x + z * sizeX;
                 ProtoChunk chunk = area[index];
+                WorkThrottle.yieldToFrames();
                 this.addReferences(chunk);
                 if (!chunk.getPersistedStatus().isOrAfter(ChunkStatus.TERRAIN)) {
-                    this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1]);
-                    this.storeTerrain(chunk);
+                    this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1]);                    this.storeTerrain(chunk);
                 }
             }
         }
         for (int z = 2; z < sizeZ - 2; z++) {
             for (int x = 2; x < sizeX - 2; x++) {
+                WorkThrottle.yieldToFrames();
                 this.decorate(chunks, area[x + z * sizeX]);
             }
         }
@@ -399,8 +407,9 @@ public final class VirtualTerrain {
         VirtualRegion region = chunks.region(this.terrainStep, chunk);
         StructureManager structureManager = this.level.structureManager().forWorldGenRegion(region);
         NoiseSettings full = this.settings.noiseSettings();
+        int fullTop = full.minY() + full.height();
         int bandMin = Math.max(full.minY(), bottom);
-        int bandTop = Math.min(full.minY() + full.height(), top);
+        int bandTop = Math.min(fullTop, Math.max(bandMin + 16, top - NOISE_BELOW_BAND_TOP));
         NoiseSettings noiseSettings = new NoiseSettings(bandMin, Math.max(0, bandTop - bandMin)).clampToHeightAccessor(chunk.getHeightAccessorForGeneration());
         if (noiseSettings.height() > 0) {
             NoiseBasedChunkGeneratorAccess access = (NoiseBasedChunkGeneratorAccess) (Object) this.generator;
@@ -409,6 +418,17 @@ public final class VirtualTerrain {
             Beardifier beardifier = Beardifier.forStructuresInChunk(structureManager, pos);
             try (NoiseChunk noiseChunk = new NoiseChunk(this.randomState, beardifier, this.surfaceSettings, this.fluidPicker, Blender.empty(), volume)) {
                 access.farplane$doFill(noiseChunk, chunk);
+                int filledTop = noiseSettings.minY() + noiseSettings.height();
+                if (filledTop < fullTop && reachesTop(chunk, filledTop - 1)) {
+                    this.fillBiomes(chunk, top, fullTop);
+                    NoiseSettings rest = new NoiseSettings(filledTop, fullTop - filledTop).clampToHeightAccessor(chunk.getHeightAccessorForGeneration());
+                    if (rest.height() > 0) {
+                        DensityVolume restVolume = new DensityVolume(16, rest.height(), 16, pos.getMinBlockX(), rest.minY(), pos.getMinBlockZ());
+                        try (NoiseChunk restChunk = new NoiseChunk(this.randomState, beardifier, this.surfaceSettings, this.fluidPicker, Blender.empty(), restVolume)) {
+                            access.farplane$doFill(restChunk, chunk);
+                        }
+                    }
+                }
                 BUILDING_SURFACE.set(true);
                 try {
                     access.farplane$buildSurface(
@@ -423,6 +443,22 @@ public final class VirtualTerrain {
             chunk, EnumSet.of(Heightmap.Types.MOTION_BLOCKING, Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Heightmap.Types.OCEAN_FLOOR, Heightmap.Types.WORLD_SURFACE)
         );
         chunk.setPersistedStatus(ChunkStatus.TERRAIN);
+    }
+
+    /** Whether the ground reaches a height anywhere in a chunk, so the terrain above it was cut off. */
+    private static boolean reachesTop(ProtoChunk chunk, int y) {
+        LevelChunkSection section = chunk.getSection(chunk.getSectionIndex(y));
+        if (section.hasOnlyAir()) {
+            return false;
+        }
+        for (int z = 0; z < 16; z++) {
+            for (int x = 0; x < 16; x++) {
+                if (!section.getBlockState(x, y & 15, z).isAir()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static Set<Holder<Biome>> possibleBiomes(VirtualRegion region, ChunkPos center) {

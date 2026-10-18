@@ -13,6 +13,11 @@ import net.minecraft.resources.Identifier;
 public final class FarPlanePayloads {
     /** Upper bound for tiles in one request packet, checked while decoding so a client cannot make the server allocate much. */
     public static final int MAX_REQUESTS_PER_PACKET = 64;
+    /**
+     * Added to the level of a requested rough tile when nothing is drawn where it goes yet. The server answers such tiles before tiles
+     * that only refine terrain already on screen, so the view is filled first.
+     */
+    public static final int REQUEST_HOLE = 0x40;
     public static final int MAX_DIRTY_CHUNKS = 2048;
 
     private FarPlanePayloads() {
@@ -116,12 +121,14 @@ public final class FarPlanePayloads {
 
     /** Same as {@link TileRequest}, for detailed tiles built from real chunks. */
     /** Detailed tiles to make; {@code generate} asks for chunks nobody has visited yet to be generated in memory. */
-    public record DetailRequest(int[] requests, boolean generate) implements CustomPacketPayload {
+    /** {@code urgency}: 0-100, how much loading speed matters to the player now, see {@code WorkThrottle}. */
+    public record DetailRequest(int[] requests, boolean generate, int urgency) implements CustomPacketPayload {
         public static final Type<DetailRequest> TYPE = new Type<>(id("detail_request"));
         public static final StreamCodec<FriendlyByteBuf, DetailRequest> CODEC = CustomPacketPayload.codec(DetailRequest::write, DetailRequest::read);
 
         private void write(FriendlyByteBuf buf) {
             buf.writeBoolean(this.generate);
+            buf.writeByte(Math.clamp(this.urgency, 0, 100));
             int count = this.requests.length / 3;
             buf.writeVarInt(count);
             for (int i = 0; i < count * 3; i++) {
@@ -131,6 +138,7 @@ public final class FarPlanePayloads {
 
         private static DetailRequest read(FriendlyByteBuf buf) {
             boolean generate = buf.readBoolean();
+            int urgency = Math.clamp(buf.readUnsignedByte(), 0, 100);
             int count = buf.readVarInt();
             if (count < 0 || count > MAX_REQUESTS_PER_PACKET) {
                 throw new DecoderException("Too many detail requests: " + count);
@@ -139,7 +147,7 @@ public final class FarPlanePayloads {
             for (int i = 0; i < requests.length; i++) {
                 requests[i] = buf.readVarInt();
             }
-            return new DetailRequest(requests, generate);
+            return new DetailRequest(requests, generate, urgency);
         }
 
         @Override

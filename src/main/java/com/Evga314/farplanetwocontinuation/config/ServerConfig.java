@@ -49,14 +49,24 @@ public class ServerConfig {
             return this.generatorThreads;
         }
         int cores = Runtime.getRuntime().availableProcessors();
-        return Mth.clamp((cores - 2) / 2, 1, 6);
+        // Phones heat up and slow down under constant load on all cores; the game's own threads need the rest.
+        return FarPlaneConstants.ANDROID ? 1 : Mth.clamp((cores - 2) / 2, 1, 6);
     }
 
     public int resolvedDetailThreads() {
         if (this.detailThreads > 0) {
             return this.detailThreads;
         }
-        return Mth.clamp(Runtime.getRuntime().availableProcessors() / 4, 1, 3);
+        // Detailed tiles run above the distant terrain generator in priority, so more of them only take its share of the CPU. All of
+        // them only work while loading is urgent (a player flying fast), see resolvedCalmDetailThreads.
+        int cores = Runtime.getRuntime().availableProcessors();
+        return FarPlaneConstants.ANDROID ? Mth.clamp(cores / 2, 1, 4) : Mth.clamp(cores * 3 / 8, 1, 4);
+    }
+
+    /** Detailed tiles worked on at the same time while loading is not urgent (walking around), so frames stay smooth. */
+    public int resolvedCalmDetailThreads() {
+        int all = this.resolvedDetailThreads();
+        return FarPlaneConstants.ANDROID ? 1 : Math.max(1, all / 2);
     }
 
     public static ServerConfig load() {

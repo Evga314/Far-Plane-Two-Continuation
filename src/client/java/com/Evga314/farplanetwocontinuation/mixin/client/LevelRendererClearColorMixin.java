@@ -30,7 +30,7 @@ abstract class LevelRendererClearColorMixin {
     private Vector4f farplane$skyColoredClear(Vector4f fogColor) {
         LodManager manager = FarplanetwocontinuationClient.manager();
         SkyRenderState sky = this.levelRenderState.skyRenderState;
-        if (manager == null || !manager.config().disableFog || sky.skybox != DimensionType.Skybox.OVERWORLD
+        if (manager == null || !manager.config().distant().disableFog || sky.skybox != DimensionType.Skybox.OVERWORLD
             || this.levelRenderState.cameraRenderState.fogType != FogType.NONE) {
             return fogColor;
         }

@@ -1,8 +1,8 @@
 package com.Evga314.farplanetwocontinuation.client.lod;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
+import com.Evga314.farplanetwocontinuation.WorkThrottle;
 import com.Evga314.farplanetwocontinuation.client.ClientConfig;
-import com.Evga314.farplanetwocontinuation.client.GpuMemory;
 import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
 import com.Evga314.farplanetwocontinuation.tile.DetailData;
 import com.Evga314.farplanetwocontinuation.tile.LoadOrder;
@@ -23,7 +23,8 @@ final class DetailLayer extends LodLayer {
     private static final long INCOMPLETE_REFRESH_MS = 60_000L;
     private static final long COMPLETE_REFRESH_MS = 300_000L;
     private static final double RING_STEP = 64.0;
-    private static final int DEFAULT_GPU_MEGABYTES = 128;
+    /** Split factor on a 1080p screen: a tile splits while its cells would take more than about 8 pixels. */
+    private static final double SPLIT_FACTOR = 1.5;
 
     private final ClientConfig config;
     private double reach;
@@ -40,8 +41,8 @@ final class DetailLayer extends LodLayer {
      * Returns the radius of the ring in blocks, 0 when detailed tiles are off. The ring never grows past what the memory budget can
      * hold at the coarsest detailed level; beyond that the rough terrain takes over instead of the ring becoming blurry.
      */
-    double configure(FarPlanePayloads.Hello hello) {
-        int radiusChunks = this.config.detailEnabled && hello.detailEnabled() ? Math.min(this.config.detailRadiusChunks, hello.detailMaxRadiusChunks()) : 0;
+    double configure(FarPlanePayloads.Hello hello, LodView view) {
+        int radiusChunks = this.config.detail().enabled && hello.detailEnabled() ? Math.min(this.config.detail().radiusChunks, hello.detailMaxRadiusChunks()) : 0;
         double coarsest = FarPlaneConstants.tileSize(FarPlaneConstants.DETAIL_MAX_LEVEL);
         double affordable = Math.sqrt(this.maxMeshes() * LEAF_SHARE * coarsest * coarsest / Math.PI) * 0.85;
         // Snapped to 64 blocks and only moved by a full step, so the edge of the ring does not wander as mesh sizes are learned.
@@ -49,8 +50,8 @@ final class DetailLayer extends LodLayer {
         if (target == 0.0 || this.reach == 0.0 || Math.abs(target - this.reach) >= RING_STEP) {
             this.reach = target;
         }
-        // Memory beyond the default is spent on finer tiles, on top of a wider ring.
-        this.splitFactor = this.config.detailQuality * GpuMemory.qualityBoost(this.config.detailGpuMegabytes, DEFAULT_GPU_MEGABYTES);
+        // Finer tiles than this would not be seen; more memory makes the ring wider instead.
+        this.splitFactor = SPLIT_FACTOR * view.screenScale;
         return this.reach;
     }
 
@@ -88,9 +89,10 @@ final class DetailLayer extends LodLayer {
         return FarPlaneConstants.DETAIL_MIN_LEVEL;
     }
 
+    /** Next to the player cells are always single blocks; they get coarser with distance on their own. */
     @Override
     int minLevel() {
-        return Mth.clamp(this.config.detailMinLevel, FarPlaneConstants.DETAIL_MIN_LEVEL, FarPlaneConstants.DETAIL_MAX_LEVEL);
+        return FarPlaneConstants.DETAIL_MIN_LEVEL;
     }
 
     @Override
@@ -110,7 +112,7 @@ final class DetailLayer extends LodLayer {
 
     @Override
     int maxMeshes() {
-        long budget = (long) this.config.detailGpuMegabytes * 1024L * 1024L;
+        long budget = (long) this.config.detail().gpuMegabytes * 1024L * 1024L;
         return (int) Mth.clamp(budget / Math.max(16 * 1024.0, this.averageBytes), 16, 8192);
     }
 
@@ -126,12 +128,14 @@ final class DetailLayer extends LodLayer {
 
     @Override
     void sendRequests(int[] requests) {
-        ClientPlayNetworking.send(new FarPlanePayloads.DetailRequest(requests, this.config.detailGenerate));
+        ClientPlayNetworking.send(new FarPlanePayloads.DetailRequest(
+            requests, this.config.detail().generate, Math.round(WorkThrottle.urgency() * 100.0F)
+        ));
     }
 
     @Override
     TileMeshBuilder.Built build(byte[] bytes, long key, int epoch, Registry<Biome> biomes, int seaLevel) throws Exception {
         DetailData data = DetailData.decode(bytes);
-        return DetailMeshBuilder.build(key, epoch, data, Arrays.asList(TileMeshBuilder.resolveBiomes(biomes, data.palette)));
+        return DetailMeshBuilder.build(key, epoch, data, Arrays.asList(TileMeshBuilder.resolveBiomes(biomes, data.palette)), this.config.detail().blocks());
     }
 }

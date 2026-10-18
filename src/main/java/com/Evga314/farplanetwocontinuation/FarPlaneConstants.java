@@ -1,8 +1,12 @@
 package com.Evga314.farplanetwocontinuation;
 
 public final class FarPlaneConstants {
+    /** Running on Android (MojoLauncher and similar launchers run the game on a regular Java there). */
+    public static final boolean ANDROID = java.nio.file.Files.exists(java.nio.file.Path.of("/system/build.prop"))
+        || System.getProperty("os.version", "").toLowerCase(java.util.Locale.ROOT).contains("android");
+
     public static final String MOD_ID = "farplanetwocontinuation";
-    public static final int PROTOCOL_VERSION = 8;
+    public static final int PROTOCOL_VERSION = 11;
 
     /** Cells along one tile edge. A tile holds TILE_CELLS + 1 samples per edge so neighbours share border samples. */
     public static final int TILE_CELLS = 32;

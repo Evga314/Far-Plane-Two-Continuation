@@ -53,7 +53,7 @@ public class Farplanetwocontinuation implements ModInitializer {
         });
         ServerPlayNetworking.registerGlobalReceiver(FarPlanePayloads.DetailRequest.TYPE, (payload, context) -> {
             if (tileServer != null) {
-                tileServer.onDetailRequest(context.player(), payload.requests(), payload.generate());
+                tileServer.onDetailRequest(context.player(), payload.requests(), payload.generate(), payload.urgency() / 100.0F);
             }
         });
         ServerPlayNetworking.registerGlobalReceiver(FarPlanePayloads.ClearCache.TYPE, (payload, context) -> {

@@ -22,20 +22,32 @@ as usual.
 **Options → Video Settings → "Far Plane (Distant Terrain)..."**. The button lives right in the menu, so no keyboard is needed on a phone.
 With [Mod Menu](https://modrinth.com/mod/modmenu) installed the same settings open from the mod list.
 
+The main page has:
+
+- **LOD Terrain**: turns distant and detailed terrain on and off in all dimensions.
+- **Loading While Moving**: how detailed terrain loads while you move. Auto (default): smooth and without input lag while walking,
+  as fast as possible while flying fast, at the cost of FPS. Smooth: always smooth frames, terrain may not keep up with fast flight.
+  Fast: always as fast as possible.
+- **Distant Terrain...** and **Detailed Terrain...**: each opens a list of dimensions (Overworld, End), and every dimension has its
+  own settings, described below.
+- **Clear LOD Cache of This Dimension...**: same as F3 + O, asks for confirmation first.
+
+**Distant Terrain** (per dimension):
+
 - **LOD Distance**: 256 to 30 000 000 blocks. The maximum means the whole world: everything up to the world border is drawn, so the
   visible area is the square world itself. Tiles form a quadtree, so their number grows logarithmically with the distance and the
   whole world costs only a little more than 1 million blocks.
-- **Detail**: how detailed the distant landscape looks right behind the normal render distance, from Ultra (a point every block)
-  to Minimal (a point every 32 blocks). Lower settings load faster and suit weak devices.
-- **Quality**: how early tiles split into finer ones (1.0-6.0, default 1.5).
+- **Start Cell Size**: size of the cells right after the detailed terrain (or after vanilla chunks when it is off): 1, 2, 4, 8 or
+  16 blocks, default 4. Farther away the cells grow on their own. Smaller cells make a smoother transition; 1 and 2 put a heavy
+  load on the CPU.
+- **Sharpness**: Economy, Normal or Sharp. How sharp the terrain looks far away; adapts to the screen resolution and FOV.
 - **GPU Memory**: video memory for distant terrain, up to 8 GB. More memory also makes the terrain sharper. Lower it on weak
   devices.
 - **Fog Start**: part of the LOD distance after which terrain fades into fog.
 - **No Fog**: removes all fog (render distance, weather, water, lava). Blindness and darkness still work. Off by default so it does
   not conflict with other fog mods.
-- **Clear LOD cache...**: same as F3 + O, asks for confirmation first.
 
-**Detailed Terrain** (a separate page in the settings): shows real blocks (trees, buildings) around the normal render distance
+**Detailed Terrain** (per dimension): shows real blocks (trees, buildings) around the normal render distance
 instead of simplified terrain, from chunks that already exist in the world. It also stands in for vanilla chunks that are not
 loaded yet.
 
@@ -44,19 +56,24 @@ loaded yet.
 
 - **Distance**: radius in chunks counted from the player, up to 256. Farther away the usual distant terrain is drawn. The area
   never grows past what the GPU memory setting can hold; beyond that the distant terrain takes over.
-- **Detail**: finest detail next to the player; it drops with distance automatically.
-- **Quality**: how early areas switch to finer detail.
-- **GPU Memory**: video memory for detailed terrain, up to 8 GB. More memory makes the area larger and sharper.
+- **Blocks**: how the blocks look. Off: flat colors of the real blocks. Low: blurred textures, thin blocks (snow, carpets, slabs)
+  and translucent water like vanilla's. Medium: vanilla textures. High: leaves with gaps, with a closed layer of leaves one block
+  further in, so crowns look full instead of hollow. Ultra: grass and flowers too, up to 64 blocks past vanilla chunks. Every step
+  uses a little more of the video card.
+- **GPU Memory**: video memory for detailed terrain, up to 8 GB. More memory makes the area larger.
 
-With Sodium installed, the same settings are also in Sodium's video settings, as the Distant Terrain and Detailed Terrain pages.
+How fine the detailed terrain is gets chosen by itself from the screen resolution and FOV: finer cells than that would not be seen.
+
+With Sodium installed, Sodium's video settings have an **Open** button that opens these settings.
 
 Key bindings (can be changed in Controls; on MojoLauncher they can be put on a custom on-screen button):
 
-- **F7** - toggle distant terrain;
+- **F7** - toggle LOD terrain;
 - **F8** - open Far Plane settings;
-- **F3 + O** - clear the LOD cache and reload all distant terrain. Listed under Debug in Controls; O can be changed, F3 stays. In
-  singleplayer this deletes the cached tiles of the world and generates them again. On a server only the tiles on your client are
-  reloaded; the server cache can only be cleared by an admin.
+- **F3 + O** - clear the LOD cache of the dimension you are in and reload its distant and detailed terrain; other dimensions keep
+  their cache. Listed under Debug in Controls; O can be changed, F3 stays. In singleplayer this deletes the cached tiles of this
+  dimension and generates them again. On a server only the tiles on your client are reloaded; the server cache can only be cleared
+  by an admin.
 
 Commands. `/FPhelp` lists them all in chat and works for every player; the `/farplane` commands are for operators, or the player
 in singleplayer with cheats allowed:
@@ -78,15 +95,22 @@ are generated for it, the number of generator threads, the request queue per pla
    level 19 covers ~16.7 million blocks. While a detailed tile is not ready yet, its coarser parent is drawn instead.
 2. Missing tiles are requested from the server (the integrated one in singleplayer).
 3. The server builds a tile straight from the world generator's noise. Chunks are **not generated or loaded**, which is what makes
-   terrain millions of blocks away possible. LOD terrain has no trees, structures or player builds: only terrain, water and biome
-   colors.
+   terrain millions of blocks away possible. LOD terrain has no structures or player builds: only terrain, water and biome
+   colors. The surface block is guessed from the biome, the height and the slope (grass, sand, snow, stone, gravel, podzol,
+   mycelium, terracotta bands in badlands, ice on frozen water) and painted like vanilla's: the average color of its texture with
+   the biome tint, slopes shaded like the sides of blocks, so the distant terrain matches the blocks next to it and follows
+   resource packs. In wooded biomes (forests, taiga, jungle, mangrove swamps, cherry groves, savannas and others) the surface is raised to
+   where the tree tops would be, in patches as dense as the trees of the biome, and painted in the color of their leaves.
 4. Near tiles find the surface exactly by sampling the noise density. Far tiles (32+ blocks between samples) use the generator's 2D
    surface estimate, which is checked against the exact surface on every tile, and take 3×3 sub-samples per cell whose colors the
-   client averages, so the world does not turn into noise made of random islands when seen from far away.
+   client averages, so the world does not turn into noise made of random islands when seen from far away. The climate that picks
+   the biomes is sampled for the whole tile at once, and everything sampled afterwards reuses it from the cache.
 5. Detailed tiles are built from real blocks: chunks loaded on the server are read directly and chunks saved on disk are read from
-   the region files without loading them into the world. For every column up to three runs of solid blocks are kept and drawn as
-   boxes colored like map colors, with grass, leaves and water tinted by the biome. Cells get coarser with distance, up to one
-   cell per 4 blocks. Region files are read a few chunks at a time, so the server's own chunk loading never waits on LOD work.
+   the region files without loading them into the world; only the sections near the surface are decoded. For every column up to
+   three runs of blocks are kept: water, leaves and other blocks that can be seen through are runs of their own, so the ground under
+   them is drawn too. They are drawn as boxes with the block textures (or their colors), with grass, leaves and water tinted by the
+   biome. Next to the player every cell is one block; cells get coarser with distance, up to one cell per 4 blocks. Region files are read a few chunks at a time, so the
+   server's own chunk loading never waits on LOD work.
    When blocks change, the server notes the chunk (a few bytes, nothing extra is saved) and the detailed tiles over it are loaded
    again, so what players built or broke shows up as soon as vanilla stops drawing that place. Where vanilla already draws a chunk,
    the detailed blocks under it are left out.
@@ -95,9 +119,15 @@ are generated for it, the number of generator threads, the request queue per pla
    surface is filled, surface rules run only for the top layers, and aquifers, caves, ores and underground features are skipped.
    Only chunks that do not exist yet are made, and the work pauses while the server is short of time. Nothing is lit, saved
    to the world or registered with it; the result is kept in `<world>/farplanetwocontinuation/virtual/`, so every region is made
-   only once. Once a chunk is really generated, its real blocks are used instead. While a tile is not ready the rough terrain shows
+   only once. Regions of 16×16 chunks are made at once, which costs about half as much per chunk as single tiles. Once a chunk is really generated, its real blocks are used instead. While a tile is not ready the rough terrain shows
    through.
-7. The higher the camera, the finer the tiles: from above the terrain is seen head-on instead of at a grazing angle. When the camera
+7. Tiles are as fine as the screen needs: each cell takes about the same number of pixels at any distance. Right after the
+   detailed terrain the cells have the start size and then double every quarter of the detailed radius (64 to 512 blocks) until
+   the screen rule takes over, so there is no jump in detail at the edge. The last part of the detailed ring (an eighth of its
+   radius, 16 to 256 blocks) blends smoothly into the distant terrain, its textures getting blurrier towards the edge, instead
+   of ending in a line. Inside the detailed terrain and vanilla's chunks the tree tops of the distant terrain lie flat, so they never
+   show through real blocks.
+   The higher the camera, the finer the tiles: from above the terrain is seen head-on instead of at a grazing angle. When the camera
    goes past the far plane of the vanilla renderer, the ground below the player is drawn by LOD as well.
 8. Finished tiles are cached in the world folder (`<world>/farplanetwocontinuation/`) and are never generated twice.
 9. The client builds meshes on a background thread and draws them through Minecraft's own rendering API (renderpearl): a separate
@@ -106,6 +136,10 @@ are generated for it, the number of generator threads, the request queue per pla
    detailed layers are only moved a little away from the camera for the depth test. Detailed tiles are left out wherever vanilla
    (or Sodium) already draws a chunk, and their back faces are culled, so walls of neighbouring tiles never flicker. Afterwards
    the depth is written again in vanilla's own depth range, so clouds behind LOD mountains are hidden.
+10. Finished meshes are uploaded to the GPU for a few milliseconds per frame at most; big ones are written in parts over several
+    frames, so loading never stalls a frame. When frames run late, the background work of the mod pauses for a moment and leaves
+    the CPU to the game. How much it holds back follows the player's speed (see Loading While Moving): walking, frames come first;
+    flying fast, terrain loads at full speed in the direction of flight.
 
 ## Phones (MojoLauncher)
 
@@ -130,8 +164,10 @@ OpenGL, LTW (GL on top of GLES 3), Zink/Freedreno, Vulkan. Limits of LTW were ta
   protection).
 - The server limits every player: request queue (512 by default) and tiles generated at the same time (6). Distance and detail are
   set by the admin.
-- Generation and mesh building run on a bounded number of background threads with minimum priority. Memory use is bounded by the
-  cache limits.
+- Generation and mesh building run on a bounded number of background threads below the priority of the game's own threads; on
+  phones fewer of them are used.
+  The CPU goes to holes in the distant terrain first, then to detailed terrain, then to refining distant terrain. Memory use is
+  bounded by the cache limits, which follow the size of the Java heap.
 
 ## License
 
@@ -144,6 +180,9 @@ FarPlaneTwoContinuation is released under the [MIT License](LICENSE.txt).
 ```
 
 The jar ends up in `build/libs/FarPlaneTwoContinuation-x.x.x.jar`.
+
+`./gradlew build -Pdebug_build` makes a debug jar that writes detailed performance logs (frame times, uploads, background threads,
+CPU frequencies, temperatures) and every settings change to `latest.log`, for finding the cause of stutters on a device.
 
 ## Who made this mod
 

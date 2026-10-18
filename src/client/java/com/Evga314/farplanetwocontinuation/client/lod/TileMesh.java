@@ -25,6 +25,14 @@ final class TileMesh implements AutoCloseable {
     final boolean complete;
     /** Detailed tiles: first quad of every chunk of the tile, row by row, plus the total at the end. */
     final int @Nullable [] chunkQuads;
+    /** Per chunk, the lowest and highest block with a drawn top or underside; see {@code DetailMeshBuilder.surfaceRange}. */
+    final int @Nullable [] chunkSurfaces;
+    /** Per chunk the first quad of its plants, which come last in the chunk; null without plants. */
+    final int @Nullable [] chunkPlants;
+    /** Detailed tiles drawn with block textures, in the larger vertex format. */
+    final boolean textured;
+    /** Has translucent water, drawn in a second pass. */
+    final boolean hasWater;
     /** When the data of this tile arrived, used to refresh detailed tiles now and then. Set back to force a refresh. */
     long receivedAt;
     /** When blocks under this tile last changed, 0 if never. */
@@ -34,11 +42,18 @@ final class TileMesh implements AutoCloseable {
      * everything. Set every tick.
      */
     int @Nullable [] drawRanges;
+    /**
+     * Chunks vanilla draws only partly, four numbers each: first index, index count, the sections vanilla draws as one bit each and
+     * the lowest of them. They are drawn without those sections. Null when there are none. Set every tick.
+     */
+    int @Nullable [] clippedChunks;
     long lastUsedTick;
     /** Fragments closer than this horizontal distance are dropped, because detailed tiles already cover them. Set every tick. */
     float discardRadius;
     /** Fragments farther than this horizontal distance are dropped, so detailed tiles end exactly at the ring. 0 keeps everything. */
     float keepRadius;
+    /** Over this width inside {@link #keepRadius} detailed tiles fade out block by block into the rough terrain. Set every tick. */
+    float fadeWidth;
     /** Distance to the camera in the current frame, used to draw near tiles first. */
     double sortDistance;
 
@@ -56,6 +71,10 @@ final class TileMesh implements AutoCloseable {
         this.complete = built.complete();
         this.receivedAt = receivedAt;
         this.chunkQuads = built.chunkQuads();
+        this.chunkSurfaces = built.chunkSurfaces();
+        this.chunkPlants = built.chunkPlants();
+        this.textured = built.textured();
+        this.hasWater = built.hasWater();
     }
 
     int chunksPerSide() {

@@ -2,6 +2,7 @@ package com.Evga314.farplanetwocontinuation.mixin.client;
 
 import com.Evga314.farplanetwocontinuation.client.FarplanetwocontinuationClient;
 import com.Evga314.farplanetwocontinuation.client.lod.LodManager;
+import com.Evga314.farplanetwocontinuation.dimension.DimensionKind;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -21,8 +22,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * left alone because it is closer than the vanilla render distance.
  * <p>
  * With the "No Fog" option every kind of fog is removed, except blindness and darkness, which are gameplay effects.
+ * <p>
+ * Sodium copies the fog for its own terrain at the same point, so this runs first (a lower priority than the default): otherwise
+ * Sodium's chunks keep vanilla's fog and fade into the sky color at the edge of the render distance.
  */
-@Mixin(FogRenderer.class)
+@Mixin(value = FogRenderer.class, priority = 500)
 abstract class FogRendererMixin {
     /** Far enough that the linear fog never starts, while staying a normal float for every GPU. */
     private static final float NO_FOG = 1.0E9F;
@@ -39,7 +43,7 @@ abstract class FogRendererMixin {
             return;
         }
         FogData fog = cir.getReturnValue();
-        if (manager.config().disableFog && !hasVisionEffect(camera)) {
+        if (manager.config().distant().disableFog && !hasVisionEffect(camera)) {
             fog.environmentalStart = NO_FOG;
             fog.environmentalEnd = NO_FOG;
             fog.renderDistanceStart = NO_FOG;
@@ -52,11 +56,12 @@ abstract class FogRendererMixin {
             return;
         }
         float end = manager.activeLodDistance();
-        float start = end * manager.config().fogStart;
+        float start = end * manager.config().distant().fogStart;
         float vanillaRange = renderDistanceInChunks * 16.0F;
         fog.renderDistanceStart = Math.max(fog.renderDistanceStart, start);
         fog.renderDistanceEnd = Math.max(fog.renderDistanceEnd, end);
-        if (fog.environmentalEnd >= vanillaRange) {
+        // The End's own fog would turn the islands into flat fog color long before the LOD distance; it is pushed out as well.
+        if (fog.environmentalEnd >= vanillaRange || DimensionKind.of(level) == DimensionKind.END) {
             fog.environmentalStart = Math.max(fog.environmentalStart, start);
             fog.environmentalEnd = Math.max(fog.environmentalEnd, end);
         }

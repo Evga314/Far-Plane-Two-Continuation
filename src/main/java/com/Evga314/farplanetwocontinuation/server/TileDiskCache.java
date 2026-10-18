@@ -32,7 +32,7 @@ import org.slf4j.Logger;
 public final class TileDiskCache {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAGIC = 0x46503243;
-    private static final int FORMAT = 6;
+    private static final int FORMAT = 7;
     private static final long MAX_FILE_SIZE = TileData.MAX_ENCODED_SIZE;
 
     private final Path root;
@@ -61,7 +61,8 @@ public final class TileDiskCache {
         return result.toString();
     }
 
-    public @Nullable TileData read(Identifier dimension, TilePos pos) {
+    /** A cached tile in its encoded form, checked to decode; null when there is none or it is damaged. */
+    public byte @Nullable [] read(Identifier dimension, TilePos pos) {
         Path file = this.file(dimension, pos);
         if (file == null || !Files.isRegularFile(file)) {
             return null;
@@ -77,7 +78,8 @@ public final class TileDiskCache {
             }
             try (InputStream body = new InflaterInputStream(in)) {
                 byte[] data = body.readNBytes(TileData.MAX_ENCODED_SIZE + 1);
-                return TileData.decode(data);
+                TileData.decode(data);
+                return data;
             }
         } catch (IOException e) {
             LOGGER.debug("Dropping unreadable cached tile {}", file, e);
@@ -85,19 +87,24 @@ public final class TileDiskCache {
         }
     }
 
+    /** Deletes every cached tile of one dimension of this world. */
+    public void clear(Identifier dimension) {
+        deleteTree(this.root.resolve(sanitize(dimension.getNamespace() + "_" + dimension.getPath())).normalize(), this.root);
+    }
+
     /**
-     * Deletes every cached tile of this world. Only regular files and directories inside the cache root are removed; symbolic links
+     * Deletes a directory with everything in it. Only regular files and directories inside {@code root} are removed; symbolic links
      * are never followed.
      */
-    public void clear() {
-        if (!Files.isDirectory(this.root, LinkOption.NOFOLLOW_LINKS)) {
+    static void deleteTree(Path directory, Path root) {
+        if (!directory.startsWith(root) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
         try {
-            Files.walkFileTree(this.root, new SimpleFileVisitor<>() {
+            Files.walkFileTree(directory, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
-                    if (attributes.isRegularFile() && file.normalize().startsWith(TileDiskCache.this.root)) {
+                    if (attributes.isRegularFile() && file.normalize().startsWith(root)) {
                         Files.deleteIfExists(file);
                     }
                     return FileVisitResult.CONTINUE;
@@ -110,7 +117,7 @@ public final class TileDiskCache {
 
                 @Override
                 public FileVisitResult postVisitDirectory(Path dir, @Nullable IOException exception) {
-                    if (dir.normalize().startsWith(TileDiskCache.this.root)) {
+                    if (dir.normalize().startsWith(root)) {
                         try {
                             Files.deleteIfExists(dir);
                         } catch (IOException e) {

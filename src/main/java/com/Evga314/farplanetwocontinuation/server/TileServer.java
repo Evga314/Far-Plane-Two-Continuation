@@ -58,6 +58,10 @@ public final class TileServer {
     private static final long INCOMPLETE_DETAIL_CACHE_MS = 5_000L;
     private static final int DETAIL_CACHE_TILES = 512;
     private static final int DIRTY_FLUSH_TICKS = 10;
+    /** Added to the score of rough tiles that only refine terrain already drawn, so every hole goes first. */
+    private static final double REFINE_PENALTY = 1.0E6;
+    /** Horizontal speed in blocks per tick from which tiles load in the direction of movement. */
+    private static final double FAST_MOTION = 0.4;
 
     private final MinecraftServer server;
     private final ServerConfig config;
@@ -86,8 +90,9 @@ public final class TileServer {
         this.server = server;
         this.config = config;
         int threads = config.resolvedThreads();
-        this.executor = createExecutor("FarPlane tile generator #", threads);
-        this.detailExecutor = createExecutor("FarPlane detail reader #", config.resolvedDetailThreads());
+        // Detailed tiles are what the player sees up close, so they get the CPU before distant terrain; both stay below the game.
+        this.executor = createExecutor("FarPlane tile generator #", threads, Thread.MIN_PRIORITY);
+        this.detailExecutor = createExecutor("FarPlane detail reader #", config.resolvedDetailThreads(), Thread.NORM_PRIORITY - 1);
         this.diskCache = config.diskCache ? new TileDiskCache(server.getWorldPath(LevelResource.ROOT), server.overworld().getSeed()) : null;
         this.virtualChunks = new VirtualChunkStore(server.getWorldPath(LevelResource.ROOT), server.overworld().getSeed());
         int memoryLimit = config.memoryCacheTiles;
@@ -98,14 +103,17 @@ public final class TileServer {
             }
         };
         LOGGER.info("FarPlane tile server started with {} generator and {} detail thread(s)", threads, config.resolvedDetailThreads());
+        if (ServerPerf.ON) {
+            LOGGER.info("[FarPlane settings] server: {}", com.Evga314.farplanetwocontinuation.config.ConfigFiles.toCompactJson(config));
+        }
     }
 
-    private static ThreadPoolExecutor createExecutor(String name, int threads) {
+    private static ThreadPoolExecutor createExecutor(String name, int threads, int priority) {
         AtomicInteger counter = new AtomicInteger();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(threads, threads, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), runnable -> {
             Thread thread = new Thread(runnable, name + counter.incrementAndGet());
             thread.setDaemon(true);
-            thread.setPriority(Thread.MIN_PRIORITY);
+            thread.setPriority(priority);
             thread.setUncaughtExceptionHandler((t, e) -> LOGGER.error("Uncaught error in {}", t.getName(), e));
             return thread;
         });
@@ -123,8 +131,9 @@ public final class TileServer {
     }
 
     /**
-     * Forgets every cached tile, both in memory and on disk. Deleting files can take a while, so it runs on its own thread and the
-     * player is answered once it is done, which keeps the client from loading stale tiles in the meantime.
+     * Forgets every cached tile of the dimension the player is in, both in memory and on disk; other dimensions keep theirs. Deleting
+     * files can take a while, so it runs on its own thread and the player is answered once it is done, which keeps the client from
+     * loading stale tiles in the meantime.
      */
     public void onClearCache(ServerPlayer player) {
         boolean allowed = this.server.isSingleplayerOwner(player.nameAndId()) || player.permissions().hasPermission(Permissions.COMMANDS_ADMIN);
@@ -133,27 +142,21 @@ public final class TileServer {
             return;
         }
         UUID playerId = player.getUUID();
+        Identifier dimension = player.level().dimension().identifier();
         if (!this.clearing.compareAndSet(false, true)) {
             return;
         }
-        synchronized (this.memoryCache) {
-            this.memoryCache.clear();
-        }
-        synchronized (this.detailCache) {
-            this.detailCache.clear();
-        }
-        this.chunkSummaries.clear();
-        this.virtualChunks.clear();
+        this.forget(dimension);
         Thread cleaner = new Thread(() -> {
             try {
                 if (this.diskCache != null) {
-                    this.diskCache.clear();
+                    this.diskCache.clear(dimension);
                 }
+                this.virtualChunks.clear(dimension);
             } finally {
                 this.server.execute(() -> {
-                    synchronized (this.memoryCache) {
-                        this.memoryCache.clear();
-                    }
+                    // Tiles finished while the files were being deleted came from the old cache.
+                    this.forget(dimension);
                     this.clearing.set(false);
                     ServerPlayer target = this.server.getPlayerList().getPlayer(playerId);
                     if (target != null && ServerPlayNetworking.canSend(target, FarPlanePayloads.CacheCleared.TYPE)) {
@@ -165,7 +168,17 @@ public final class TileServer {
         cleaner.setDaemon(true);
         cleaner.setPriority(Thread.MIN_PRIORITY);
         cleaner.start();
-        LOGGER.info("{} cleared the FarPlane LOD tile cache", player.getName().getString());
+        LOGGER.info("{} cleared the FarPlane LOD tile cache of {}", player.getName().getString(), dimension);
+    }
+
+    private void forget(Identifier dimension) {
+        synchronized (this.memoryCache) {
+            this.memoryCache.keySet().removeIf(key -> key.dimension().equals(dimension));
+        }
+        synchronized (this.detailCache) {
+            this.detailCache.keySet().removeIf(key -> key.dimension().equals(dimension));
+        }
+        this.chunkSummaries.clear(dimension);
     }
 
     /**
@@ -175,6 +188,15 @@ public final class TileServer {
      */
     public void tick() {
         this.pumpPregen();
+        if (ServerPerf.ON && this.ticks % 100 == 0) {
+            int rough = 0;
+            int detail = 0;
+            for (PlayerState state : this.players.values()) {
+                rough += state.roughQueue.size() + state.roughInFlight;
+                detail += state.detailQueue.size() + state.detailInFlight;
+            }
+            ServerPerf.summary(this.server.getAverageTickTimeNanos() / 1e6, rough, detail);
+        }
         if (++this.ticks % DIRTY_FLUSH_TICKS != 0) {
             return;
         }
@@ -251,7 +273,15 @@ public final class TileServer {
             }
         }
         tiles.sort(Comparator.comparingDouble(tile -> tile.distanceTo(centerBlockX, centerBlockZ)));
-        this.pregen = new Pregen(source, level, tiles, Util.getMillis());
+        // An area is one region of generated chunks. Where they were generated before or the world has real chunks, it is only read.
+        boolean[] ready = new boolean[tiles.size()];
+        int half = size / 2;
+        for (int i = 0; i < tiles.size(); i++) {
+            TilePos tile = tiles.get(i);
+            ready[i] = this.virtualChunks.hasStored(level, tile.x(), tile.z())
+                || RegionFiles.mayContain(level, tile.x() * size + half, tile.z() * size + half);
+        }
+        this.pregen = new Pregen(source, level, tiles, ready, Util.getMillis());
         this.pregen.showProgressBar(this.server);
         source.sendSuccess(() -> FarPlaneCommand.message("started",
             "Generating detailed terrain within %s chunks around chunk %s %s: %s areas", radius, centerX, centerZ, tiles.size()), true);
@@ -308,7 +338,7 @@ public final class TileServer {
                 }
                 this.server.execute(() -> {
                     running.busy = false;
-                    running.done++;
+                    running.finishedOne();
                     if (this.pregen == running && running.shouldReport()) {
                         running.tell(running.progressMessage());
                     }
@@ -327,9 +357,10 @@ public final class TileServer {
         this.accept(player, requests, false);
     }
 
-    public void onDetailRequest(ServerPlayer player, int[] requests, boolean generate) {
+    public void onDetailRequest(ServerPlayer player, int[] requests, boolean generate, float urgency) {
         PlayerState state = this.players.computeIfAbsent(player.getUUID(), uuid -> new PlayerState());
         state.generateVirtual = generate;
+        state.urgency = urgency;
         this.accept(player, requests, true);
     }
 
@@ -356,7 +387,8 @@ public final class TileServer {
             if (state.queue(detail).size() >= this.config.maxQueuedRequestsPerPlayer) {
                 break;
             }
-            int tileLevel = requests[i];
+            boolean hole = (requests[i] & FarPlanePayloads.REQUEST_HOLE) != 0;
+            int tileLevel = requests[i] & ~FarPlanePayloads.REQUEST_HOLE;
             if (tileLevel < minLevel || tileLevel > maxLevel) {
                 continue;
             }
@@ -368,7 +400,7 @@ public final class TileServer {
             if (detail ? distance > detailRadius : !wholeWorld && distance > this.config.maxDistance) {
                 continue;
             }
-            Job job = new Job(pos, detail);
+            Job job = new Job(pos, detail, hole && !detail);
             if (state.queued.add(job.key())) {
                 state.queue(detail).add(job);
             }
@@ -377,25 +409,41 @@ public final class TileServer {
     }
 
     /**
-     * Rough and detailed tiles have separate queues and limits. Detailed tiles can be slow because they read chunks from disk, and
-     * without the split they would hold back the cheap rough tiles that fill the view first.
+     * Rough and detailed tiles have separate queues and limits. Detailed tiles can be slow because they read chunks from disk or
+     * generate them, and without the split they would hold back the cheap rough tiles that fill the view first. Both share the CPU in
+     * this order: rough tiles that fill a hole, detailed tiles, rough tiles that only refine distant terrain. While any player waits
+     * for detailed tiles, refining goes on with a single tile at a time.
      */
     private void pump(ServerPlayer player, PlayerState state) {
-        this.pump(player, state, false, this.config.maxInFlightPerPlayer);
-        this.pump(player, state, true, Math.max(2, this.config.resolvedDetailThreads() * 2));
-        boolean roughBusy = false;
+        boolean detailBusy = false;
         for (PlayerState other : this.players.values()) {
-            roughBusy |= !other.roughQueue.isEmpty() || other.roughInFlight > 0;
+            detailBusy |= !other.detailQueue.isEmpty() || other.detailInFlight > 0;
         }
-        this.virtualChunks.setRoughBusy(roughBusy);
+        this.pump(player, state, false, this.config.maxInFlightPerPlayer, detailBusy);
+        // As many detailed tiles at once as loading is urgent for this player: one or a few while walking, all threads while flying.
+        int calm = this.config.resolvedCalmDetailThreads();
+        int all = this.config.resolvedDetailThreads();
+        this.pump(player, state, true, calm + Math.round((all - calm) * state.urgency), false);
     }
 
-    private void pump(ServerPlayer player, PlayerState state, boolean detail, int limit) {
+    private void pump(ServerPlayer player, PlayerState state, boolean detail, int limit, boolean refineSlowly) {
         UUID playerId = player.getUUID();
         List<Job> queue = state.queue(detail);
         double detailRadius = this.config.detailMaxRadiusChunks * 16.0 + 64.0;
         while (state.inFlight(detail) < limit && !queue.isEmpty()) {
-            Job job = takeMostImportant(queue, player, detail);
+            Identifier dimensionId = state.dimension == null ? null : state.dimension.identifier();
+            int best = mostImportant(queue, player, detail,
+                detail && dimensionId != null ? pos -> this.virtualChunks.busy(dimensionId, pos) : pos -> false);
+            if (best < 0) {
+                // Every waiting tile needs a region that is being made right now; the next one starts when it is done.
+                return;
+            }
+            if (refineSlowly && !queue.get(best).hole() && state.inFlight(detail) > 0) {
+                return;
+            }
+            Job job = queue.get(best);
+            queue.set(best, queue.get(queue.size() - 1));
+            queue.remove(queue.size() - 1);
             state.queued.remove(job.key());
             // The player moves on while tiles wait; detailed tiles left far behind are not worth reading any more.
             if (detail && job.pos().distanceTo(player.getX(), player.getZ()) > detailRadius) {
@@ -414,7 +462,11 @@ public final class TileServer {
                 (job.detail() ? this.detailExecutor : this.executor).execute(() -> {
                     byte[] result = null;
                     try {
+                        long start = ServerPerf.ON ? System.nanoTime() : 0L;
                         result = job.detail() ? this.produceDetail(level, job.pos(), loaded, virtual) : this.produce(level, job.pos());
+                        if (ServerPerf.ON) {
+                            (job.detail() ? ServerPerf.DETAIL : ServerPerf.ROUGH).add(System.nanoTime() - start);
+                        }
                     } catch (Exception e) {
                         LOGGER.warn("Failed to generate tile {} in {}", job.pos(), dimension.identifier(), e);
                     }
@@ -429,32 +481,35 @@ public final class TileServer {
     }
 
     /**
-     * Takes the job that matters most where the player is now and looks now, not where they were when they asked, in the same order
-     * the client asks in: rough tiles big and close first, detailed tiles around the player first and then in view. Queues are short,
-     * so a plain scan is cheap.
+     * Finds the job that matters most where the player is now and looks now, not where they were when they asked, in the same order
+     * the client asks in: rough tiles that fill a hole first, then big and close ones; detailed tiles around the player first and then
+     * in view. Tiles that would only wait for a region another thread is making are left for later. Queues are short, so a plain scan
+     * is cheap. Returns -1 when every tile has to wait.
      */
-    private static Job takeMostImportant(List<Job> queue, ServerPlayer player, boolean detail) {
+    private static int mostImportant(List<Job> queue, ServerPlayer player, boolean detail, java.util.function.Predicate<TilePos> blocked) {
         double x = player.getX();
         double z = player.getZ();
-        Vec3 look = player.getLookAngle();
+        // Flying fast, the way the player moves matters more than where they look.
+        Vec3 motion = player.getDeltaMovement();
+        Vec3 look = motion.x * motion.x + motion.z * motion.z > FAST_MOTION * FAST_MOTION ? motion : player.getLookAngle();
         double horizontal = Math.sqrt(look.x * look.x + look.z * look.z);
         double lookX = horizontal > 0.05 ? look.x / horizontal : 0.0;
         double lookZ = horizontal > 0.05 ? look.z / horizontal : 0.0;
-        int best = 0;
+        int best = -1;
         double bestScore = Double.MAX_VALUE;
         for (int i = 0; i < queue.size(); i++) {
-            TilePos pos = queue.get(i).pos();
-            double score = detail ? LoadOrder.score(pos, x, z, lookX, lookZ) : pos.distanceTo(x, z) / pos.size();
+            Job job = queue.get(i);
+            TilePos pos = job.pos();
+            if (blocked.test(pos)) {
+                continue;
+            }
+            double score = detail ? LoadOrder.score(pos, x, z, lookX, lookZ) : pos.distanceTo(x, z) / pos.size() + (job.hole() ? 0.0 : REFINE_PENALTY);
             if (score < bestScore) {
                 bestScore = score;
                 best = i;
             }
         }
-        int last = queue.size() - 1;
-        Job job = queue.get(best);
-        queue.set(best, queue.get(last));
-        queue.remove(last);
-        return job;
+        return best;
     }
 
     /**
@@ -524,10 +579,7 @@ public final class TileServer {
         }
         byte[] encoded = null;
         if (this.diskCache != null) {
-            TileData data = this.diskCache.read(dimension, pos);
-            if (data != null) {
-                encoded = data.encode();
-            }
+            encoded = this.diskCache.read(dimension, pos);
         }
         if (encoded == null) {
             encoded = TileGenerator.generate(level, pos).encode();
@@ -582,10 +634,26 @@ public final class TileServer {
     /** A running pre-generation. Only touched on the server thread. */
     private static final class Pregen {
         private static final long REPORT_MS = 30_000L;
+        /** How fast a new measurement of an area changes the average time of its kind. */
+        private static final double AVERAGE_WEIGHT = 0.2;
+        /** Until areas of a kind have been measured, new areas count as this many times slower than ready ones. */
+        private static final double NEW_PER_READY = 15.0;
+        /**
+         * Below this share of the areas done the time left is not shown yet: the first areas say too little about the rest, and an
+         * early guess would jump around. Running dots show that it is being worked out.
+         */
+        private static final int ESTIMATE_FROM_PERCENT = 15;
+        /** How fast the shown time follows a lower estimate; a higher one is followed much slower, so the time keeps counting down. */
+        private static final double FOLLOW_DOWN = 0.15;
+        private static final double FOLLOW_UP = 0.02;
 
         private final CommandSourceStack source;
         private final ServerLevel level;
         private final List<TilePos> tiles;
+        /** Areas only read from disk, a small part of the work of areas generated from scratch. */
+        private final boolean[] ready;
+        /** Number of new areas from each index to the end. */
+        private final int[] newFrom;
         private final long started;
         /** The player who started it, shown the progress above the hotbar; null when started from the console. */
         private final @Nullable UUID player;
@@ -594,32 +662,99 @@ public final class TileServer {
         private boolean busy;
         private int lastReportedTenth;
         private long lastReport;
+        private long lastFinished;
+        private double readySeconds = -1.0;
+        private double newSeconds = -1.0;
+        private double shownSeconds = -1.0;
+        private long shownAt;
 
-        Pregen(CommandSourceStack source, ServerLevel level, List<TilePos> tiles, long started) {
+        Pregen(CommandSourceStack source, ServerLevel level, List<TilePos> tiles, boolean[] ready, long started) {
             this.source = source;
             this.level = level;
             this.tiles = tiles;
+            this.ready = ready;
+            this.newFrom = new int[tiles.size() + 1];
+            for (int i = tiles.size() - 1; i >= 0; i--) {
+                this.newFrom[i] = this.newFrom[i + 1] + (ready[i] ? 0 : 1);
+            }
             this.started = started;
+            this.lastFinished = started;
             this.lastReport = started;
             ServerPlayer player = source.getPlayer();
             this.player = player == null ? null : player.getUUID();
         }
 
+        /** Areas are done one after another, so the time since the last one is what this one took. */
+        void finishedOne() {
+            long now = Util.getMillis();
+            double seconds = (now - this.lastFinished) / 1000.0;
+            this.lastFinished = now;
+            if (this.done < this.ready.length) {
+                if (this.ready[this.done]) {
+                    this.readySeconds = this.readySeconds < 0.0 ? seconds : this.readySeconds + (seconds - this.readySeconds) * AVERAGE_WEIGHT;
+                } else {
+                    this.newSeconds = this.newSeconds < 0.0 ? seconds : this.newSeconds + (seconds - this.newSeconds) * AVERAGE_WEIGHT;
+                }
+            }
+            this.done++;
+        }
+
         /** A short progress line at the bottom of the screen of the player who started it, refreshed every second. */
         void showProgressBar(MinecraftServer server) {
+            this.updateEstimate();
             ServerPlayer target = this.player == null ? null : server.getPlayerList().getPlayer(this.player);
             if (target == null) {
                 return;
             }
             long left = this.secondsLeft();
-            String time = this.done == 0 ? "..." : String.format(Locale.ROOT, "%d:%02d", left / 60L, left % 60L);
+            if (left < 0L || this.percent() < ESTIMATE_FROM_PERCENT) {
+                String dots = ".".repeat((int) (Util.getMillis() / 1000L % 3L) + 1);
+                target.sendOverlayMessage(FarPlaneCommand.message("bar_estimating", "Detailed terrain: %s%% (%s of %s), estimating the time left%s",
+                    this.percent(), this.done, this.tiles.size(), dots));
+                return;
+            }
+            String time = String.format(Locale.ROOT, "%d:%02d", left / 60L, left % 60L);
             target.sendOverlayMessage(FarPlaneCommand.message("bar", "Detailed terrain: %s%% (%s of %s), %s minutes left",
                 this.percent(), this.done, this.tiles.size(), time));
         }
 
+        /** Seconds left, or -1 while there is no estimate yet. */
         private long secondsLeft() {
-            long elapsed = Util.getMillis() - this.started;
-            return this.done == 0 ? 0L : elapsed * (this.tiles.size() - this.done) / this.done / 1000L;
+            if (this.done >= this.tiles.size()) {
+                return 0L;
+            }
+            return this.shownSeconds < 0.0 ? -1L : Math.round(this.shownSeconds);
+        }
+
+        /**
+         * Areas near the center are often ready already, read in a fraction of the time new land takes to generate, so measuring the
+         * speed of the first areas would promise far too little time and then keep adding to it. Both kinds are timed separately and
+         * the areas left of each kind are counted ahead. The shown value counts down every second and follows the estimate smoothly:
+         * quickly down, slowly up.
+         */
+        private void updateEstimate() {
+            int total = this.tiles.size();
+            if (this.done >= total || this.readySeconds < 0.0 && this.newSeconds < 0.0) {
+                return;
+            }
+            double newSeconds = this.newSeconds >= 0.0 ? this.newSeconds : this.readySeconds * NEW_PER_READY;
+            double readySeconds = this.readySeconds >= 0.0 ? this.readySeconds : this.newSeconds / NEW_PER_READY;
+            int newLeft = this.newFrom[this.done];
+            int readyLeft = total - this.done - newLeft;
+            double estimate = newLeft * newSeconds + readyLeft * readySeconds;
+            // The area being worked on has been running for a while already.
+            double running = (Util.getMillis() - this.lastFinished) / 1000.0;
+            double current = this.ready[this.done] ? readySeconds : newSeconds;
+            estimate += Math.max(0.0, running - current);
+            long now = Util.getMillis();
+            if (this.shownSeconds < 0.0) {
+                this.shownSeconds = estimate;
+            } else {
+                this.shownSeconds = Math.max(0.0, this.shownSeconds - (now - this.shownAt) / 1000.0);
+                double follow = estimate < this.shownSeconds ? FOLLOW_DOWN : FOLLOW_UP;
+                this.shownSeconds += (estimate - this.shownSeconds) * follow;
+            }
+            this.shownAt = now;
         }
 
         int percent() {
@@ -640,6 +775,10 @@ public final class TileServer {
 
         Component progressMessage() {
             long left = this.secondsLeft();
+            if (left < 0L || this.percent() < ESTIMATE_FROM_PERCENT) {
+                return FarPlaneCommand.message("progress_estimating", "Detailed terrain: %s%% (%s of %s areas), estimating the time left",
+                    this.percent(), this.done, this.tiles.size());
+            }
             return FarPlaneCommand.message("progress", "Detailed terrain: %s%% (%s of %s areas), about %s min %s s left",
                 this.percent(), this.done, this.tiles.size(), left / 60L, left % 60L);
         }
@@ -653,7 +792,8 @@ public final class TileServer {
         }
     }
 
-    private record Job(TilePos pos, boolean detail) {
+    /** {@code hole}: a rough tile where nothing is drawn yet, see {@link FarPlanePayloads#REQUEST_HOLE}. */
+    private record Job(TilePos pos, boolean detail, boolean hole) {
         long key() {
             return this.pos.pack() ^ (this.detail ? Long.MIN_VALUE : 0L);
         }
@@ -670,6 +810,7 @@ public final class TileServer {
         private boolean generateVirtual;
         private int roughInFlight;
         private int detailInFlight;
+        private float urgency;
 
         List<Job> queue(boolean detail) {
             return detail ? this.detailQueue : this.roughQueue;

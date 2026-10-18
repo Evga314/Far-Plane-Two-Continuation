@@ -19,6 +19,8 @@ import org.jspecify.annotations.Nullable;
 public final class TileData {
     public static final int FLAG_WATER = 1;
     public static final int FLAG_LAVA = 2;
+    /** Nothing at all below this sample (the void between the End islands); its height is the one of the land next to it. */
+    public static final int FLAG_VOID = 4;
 
     public static final int MAX_PALETTE = 256;
     private static final int MAX_ID_LENGTH = 256;

@@ -10,6 +10,7 @@
     "LevelRendererClearColorMixin",
     "LevelRendererMixin",
     "RenderSectionMixin",
+    "SpriteContentsAccessor",
     "VideoSettingsScreenMixin"
   ],
   "injectors": {

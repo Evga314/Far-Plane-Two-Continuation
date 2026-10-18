@@ -12,9 +12,16 @@ import org.jspecify.annotations.Nullable;
  * exist yet are remembered for a short while too, so asking about unexplored land again stays cheap.
  */
 final class ChunkSummaryCache {
-    private static final int MAX_ENTRIES = 2048;
-    /** Saved chunks only change while loaded, and then the live chunk is used; this only limits how stale an unloaded one can get. */
-    private static final long SAVED_TTL_MS = 120_000L;
+    /**
+     * About 9 KB each, so one entry per megabyte of heap (4096 with 4 GB): enough for the ring of detailed tiles around a player,
+     * with every detail level over the same chunks, without crowding small heaps on phones.
+     */
+    private static final int MAX_ENTRIES = (int) Math.clamp(Runtime.getRuntime().maxMemory() >> 20, 1024L, 6144L);
+    /**
+     * Saved chunks only change while loaded: then the live chunk is used, and the change drops the cached summary. This only limits how
+     * stale a chunk changed by other tools can get.
+     */
+    private static final long SAVED_TTL_MS = 900_000L;
     private static final long MISSING_TTL_MS = 10_000L;
 
     private final Map<Key, Cached> entries = new LinkedHashMap<>(512, 0.75F, true) {
@@ -48,6 +55,10 @@ final class ChunkSummaryCache {
 
     synchronized void clear() {
         this.entries.clear();
+    }
+
+    synchronized void clear(Identifier dimension) {
+        this.entries.keySet().removeIf(key -> key.dimension().equals(dimension));
     }
 
     record Lookup(@Nullable ChunkSummary summary) {

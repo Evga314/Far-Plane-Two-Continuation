@@ -12,6 +12,8 @@ final class DetailCoverage {
     private static final int CELL = FarPlaneConstants.tileSize(FarPlaneConstants.DETAIL_MIN_LEVEL);
 
     private final double radius;
+    /** Width of the band at the edge of the ring where detailed tiles fade into the rough terrain under them. */
+    private final double fade;
     private final double camX;
     private final double camZ;
     private final long originX;
@@ -20,8 +22,9 @@ final class DetailCoverage {
     /** {@code missing[(z + 1) * (size + 1) + x + 1]} = missing cells in the rectangle from the origin to (x, z) inclusive. */
     private final int[] missing;
 
-    DetailCoverage(LodView view, double radius, List<TileMesh> detailTiles) {
+    DetailCoverage(LodView view, double radius, double fade, List<TileMesh> detailTiles) {
         this.radius = radius;
+        this.fade = fade;
         this.camX = view.camX;
         this.camZ = view.camZ;
         this.originX = Math.floorDiv((long) Math.floor(view.camX - radius), CELL);
@@ -79,16 +82,19 @@ final class DetailCoverage {
             - this.missing[(int) (z1 * stride + x0)] + this.missing[(int) (z0 * stride + x0)];
     }
 
-    /** A rough tile completely inside the ring, whose whole area is already shown, does not need to be drawn. */
+    /** A rough tile completely inside the ring and its fading edge, whose whole area is already shown, does not need to be drawn. */
     boolean coversTile(TilePos pos) {
-        return pos.farthestDistanceTo(this.camX, this.camZ) <= this.radius && this.missingIn(pos) == 0;
+        return pos.farthestDistanceTo(this.camX, this.camZ) <= this.radius - this.fade && this.missingIn(pos) == 0;
     }
 
-    /** Radius to cut out of a rough tile reaching into the ring, or 0 while part of the ring under it is still missing. */
+    /**
+     * Radius to cut out of a rough tile reaching into the ring, or 0 while part of the ring under it is still missing. The rough
+     * terrain stays under the fading edge of the ring, where it shows through.
+     */
     float cutoutRadius(TilePos pos) {
-        if (pos.distanceTo(this.camX, this.camZ) >= this.radius) {
+        if (pos.distanceTo(this.camX, this.camZ) >= this.radius - this.fade) {
             return 0.0F;
         }
-        return this.missingIn(pos) == 0 ? (float) this.radius : 0.0F;
+        return this.missingIn(pos) == 0 ? (float) (this.radius - this.fade) : 0.0F;
     }
 }

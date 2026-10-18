@@ -7,6 +7,10 @@ beyond the normal render distance, all the way to the edge of the world: **30 00
 
 Works on PC and on Android.
 
+## Download
+
+Latest release versions available on [Curseforge](https://www.curseforge.com/minecraft/mc-mods/far-plane-two-continuation).
+
 ## Installation
 
 | Where you play | Where to install |

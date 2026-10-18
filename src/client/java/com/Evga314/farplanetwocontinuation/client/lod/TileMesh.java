@@ -23,8 +23,12 @@ final class TileMesh implements AutoCloseable {
     final long coverage;
     /** Detailed tiles: every chunk had data. Incomplete tiles are refreshed sooner, the missing chunks may exist by now. */
     final boolean complete;
-    /** Detailed tiles: first quad of every chunk of the tile, row by row, plus the total at the end. */
-    final int @Nullable [] chunkQuads;
+    /**
+     * Detailed tiles: quads are sorted by the way they face (the groups below) and within a group chunk by chunk, row by row. This holds
+     * the first quad of every chunk in every group, group by group, plus the total at the end, so a group of a chunk runs from
+     * {@code segments[group * chunks + chunk]} to the next entry.
+     */
+    final int @Nullable [] segments;
     /** Per chunk, the lowest and highest block with a drawn top or underside; see {@code DetailMeshBuilder.surfaceRange}. */
     final int @Nullable [] chunkSurfaces;
     /** Per chunk the first quad of its plants, which come last in the chunk; null without plants. */
@@ -33,6 +37,18 @@ final class TileMesh implements AutoCloseable {
     final boolean textured;
     /** Has translucent water, drawn in a second pass. */
     final boolean hasWater;
+    /** Has faces whose texture has gaps, which the shader drops texel by texel. */
+    final boolean hasCutout;
+    /** Rough tiles: lowest ground of each part of the tile, for {@link Horizon}. */
+    final float @Nullable [] partLows;
+    /** Hidden behind terrain this tick, see {@link Horizon}. */
+    boolean occluded;
+    /** Detailed tiles: chunks hidden behind terrain this tick, see {@link Horizon}. */
+    boolean @Nullable [] hiddenChunks;
+    /** Index ranges for this frame only, {@link #drawRanges} without the chunks off screen; null uses those. */
+    int @Nullable [] frameRanges;
+    /** Nothing of this tile is cut away this frame, so it is drawn with a shader that never drops a fragment. */
+    boolean solid;
     /** When the data of this tile arrived, used to refresh detailed tiles now and then. Set back to force a refresh. */
     long receivedAt;
     /** When blocks under this tile last changed, 0 if never. */
@@ -70,16 +86,33 @@ final class TileMesh implements AutoCloseable {
         this.coverage = built.coverage();
         this.complete = built.complete();
         this.receivedAt = receivedAt;
-        this.chunkQuads = built.chunkQuads();
+        this.segments = built.segments();
         this.chunkSurfaces = built.chunkSurfaces();
         this.chunkPlants = built.chunkPlants();
         this.textured = built.textured();
         this.hasWater = built.hasWater();
+        this.hasCutout = built.hasCutout();
+        this.partLows = !built.detail() && built.heights() != null ? Horizon.partLows(built.heights()) : null;
     }
 
     int chunksPerSide() {
-        return this.chunkQuads == null ? 0 : (int) Math.round(Math.sqrt(this.chunkQuads.length - 1));
+        return this.chunkSurfaces == null ? 0 : (int) Math.round(Math.sqrt(this.chunkSurfaces.length / 2.0));
     }
+
+    /**
+     * The ways faces of detailed tiles can face, in the order they are stored. Faces turned away from the camera are left out of
+     * drawing; the order puts the groups usually seen together next to each other, so they are drawn with one call: tops and other
+     * faces, and the two sides facing the camera.
+     */
+    static final int GROUP_UP = 0;
+    /** Plants and the slanted sides of stalks, never left out. */
+    static final int GROUP_OTHER = 1;
+    static final int GROUP_NORTH = 2;
+    static final int GROUP_WEST = 3;
+    static final int GROUP_SOUTH = 4;
+    static final int GROUP_EAST = 5;
+    static final int GROUP_DOWN = 6;
+    static final int GROUPS = 7;
 
     /** Height of the LOD surface at a world position inside this tile, interpolated the same way the mesh is drawn. */
     float heightAt(double x, double z) {

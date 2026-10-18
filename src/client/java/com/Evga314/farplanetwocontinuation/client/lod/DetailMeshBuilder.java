@@ -174,14 +174,14 @@ final class DetailMeshBuilder {
             }
         }
 
-        // Quads are written chunk by chunk, so the parts of the tile that vanilla already draws can be left out when drawing.
+        // Quads are sorted by the way they face and written chunk by chunk within each way (see TileMesh#segments), so the parts of
+        // the tile that vanilla already draws, that are hidden or off screen, and the faces turned away from the camera can be left out.
         int cellsPerChunk = Math.max(1, 16 / cell);
         int chunksPerSide = CELLS / cellsPerChunk;
-        int[] chunkQuads = new int[chunksPerSide * chunksPerSide + 1];
         int[] chunkSurfaces = new int[chunksPerSide * chunksPerSide * 2];
+        out.chunks(chunksPerSide * chunksPerSide);
         // Plants come last in every chunk, so far chunks can be drawn without them.
         boolean plants = detail.plants() && cell == 1;
-        int[] chunkPlants = plants ? new int[chunksPerSide * chunksPerSide] : null;
         BlockLooks.Look stone = BlockLooks.get(STONE);
         int floorPaint = paints.index(paint(stone.top(), stone.state(), false, detail, null, 0, 0, 0));
         Cells cells = new Cells(
@@ -192,7 +192,7 @@ final class DetailMeshBuilder {
         for (int chunkZ = 0; chunkZ < chunksPerSide; chunkZ++) {
             for (int chunkX = 0; chunkX < chunksPerSide; chunkX++) {
                 WorkThrottle.yieldToFrames();
-                chunkQuads[chunkX + chunkZ * chunksPerSide] = out.quads;
+                out.startChunk(chunkX + chunkZ * chunksPerSide);
                 int startX = chunkX * cellsPerChunk;
                 int startZ = chunkZ * cellsPerChunk;
                 surfaceRange(data, clearBlocks, startX, startZ, cellsPerChunk, chunkSurfaces, (chunkX + chunkZ * chunksPerSide) * 2);
@@ -202,8 +202,8 @@ final class DetailMeshBuilder {
                         cells.boxes(out, cx, cz);
                     }
                 }
-                if (chunkPlants != null) {
-                    chunkPlants[chunkX + chunkZ * chunksPerSide] = out.quads;
+                if (plants) {
+                    out.startPlants(chunkX + chunkZ * chunksPerSide);
                     for (int cz = startZ; cz < startZ + cellsPerChunk; cz++) {
                         for (int cx = startX; cx < startX + cellsPerChunk; cx++) {
                             cells.plant(out, cx, cz);
@@ -212,16 +212,16 @@ final class DetailMeshBuilder {
                 }
             }
         }
-        chunkQuads[chunkQuads.length - 1] = out.quads;
-
         ByteBuffer vertices = out.finish();
+        int[] segments = out.segments();
+        int[] chunkPlants = plants ? out.plantStarts() : null;
         if (minY > maxY) {
             minY = 0.0F;
             maxY = 0.0F;
         }
         return new TileMeshBuilder.Built(
-            key, epoch, vertices, minY, maxY, minY, null, out.quads * 6, true, coverage(data, cell), data.isComplete(), chunkQuads, chunkSurfaces,
-            textured, hasWater, chunkPlants
+            key, epoch, vertices, minY, maxY, minY, null, out.quads * 6, true, coverage(data, cell), data.isComplete(), segments, chunkSurfaces,
+            textured, hasWater, chunkPlants, out.cutout
         );
     }
 
@@ -641,37 +641,99 @@ final class DetailMeshBuilder {
     private static final class QuadWriter {
         private final boolean textured;
         private final int vertexSize;
+        /** One growing buffer per way faces can face, see {@link TileMesh#GROUPS}. */
+        private final ByteBuffer[] buffers;
         private ByteBuffer buffer;
+        private final int[] counts = new int[TileMesh.GROUPS];
+        private int chunks = 1;
+        /** Quads of each group before each chunk, group by group. */
+        private int[] chunkStarts = new int[TileMesh.GROUPS];
+        /** Quads of {@link TileMesh#GROUP_OTHER} before the plants of each chunk. */
+        private int[] plantStarts = new int[1];
         int quads;
+        /** Some face has a texture with gaps. */
+        boolean cutout;
 
         /**
-         * The growing buffer quads are written to, kept per mesh builder thread: building every tile in a fresh one that doubles a few
+         * The growing buffers quads are written to, kept per mesh builder thread: building every tile in fresh ones that double a few
          * times would leave megabytes of native memory behind per tile until the garbage collector frees it.
          */
-        private static final ThreadLocal<ByteBuffer> SCRATCH = ThreadLocal.withInitial(
-            () -> ByteBuffer.allocateDirect(256 * 1024).order(ByteOrder.nativeOrder())
-        );
+        private static final ThreadLocal<ByteBuffer[]> SCRATCH = ThreadLocal.withInitial(() -> {
+            ByteBuffer[] buffers = new ByteBuffer[TileMesh.GROUPS];
+            for (int g = 0; g < buffers.length; g++) {
+                buffers[g] = ByteBuffer.allocateDirect(64 * 1024).order(ByteOrder.nativeOrder());
+            }
+            return buffers;
+        });
 
         QuadWriter(boolean textured) {
             this.textured = textured;
             this.vertexSize = textured ? TEXTURED_VERTEX_SIZE : TileMeshBuilder.VERTEX_SIZE;
-            this.buffer = SCRATCH.get();
-            this.buffer.clear();
+            this.buffers = SCRATCH.get();
+            for (ByteBuffer group : this.buffers) {
+                group.clear();
+            }
+            this.buffer = this.buffers[0];
+        }
+
+        void chunks(int count) {
+            this.chunks = count;
+            this.chunkStarts = new int[TileMesh.GROUPS * count];
+            this.plantStarts = new int[count];
+        }
+
+        void startChunk(int chunk) {
+            for (int g = 0; g < TileMesh.GROUPS; g++) {
+                this.chunkStarts[g * this.chunks + chunk] = this.counts[g];
+            }
+        }
+
+        void startPlants(int chunk) {
+            this.plantStarts[chunk] = this.counts[TileMesh.GROUP_OTHER];
+        }
+
+        /** The way a quad faces, from its first three corners, which go round counterclockwise seen from the front. */
+        private static int group(float ax, float ay, float az, float bx, float by, float bz, float cx, float cy, float cz) {
+            float ux = bx - ax;
+            float uy = by - ay;
+            float uz = bz - az;
+            float vx = cx - ax;
+            float vy = cy - ay;
+            float vz = cz - az;
+            float nx = uy * vz - uz * vy;
+            float ny = uz * vx - ux * vz;
+            float nz = ux * vy - uy * vx;
+            float length = Math.abs(nx) + Math.abs(ny) + Math.abs(nz);
+            float tolerance = length * 1.0E-4F;
+            if (Math.abs(nx) <= tolerance && Math.abs(nz) <= tolerance) {
+                return ny > 0.0F ? TileMesh.GROUP_UP : TileMesh.GROUP_DOWN;
+            }
+            if (Math.abs(ny) <= tolerance && Math.abs(nx) <= tolerance) {
+                return nz > 0.0F ? TileMesh.GROUP_SOUTH : TileMesh.GROUP_NORTH;
+            }
+            if (Math.abs(ny) <= tolerance && Math.abs(nz) <= tolerance) {
+                return nx > 0.0F ? TileMesh.GROUP_EAST : TileMesh.GROUP_WEST;
+            }
+            return TileMesh.GROUP_OTHER;
         }
 
         void quad(
             float ax, float ay, float az, float bx, float by, float bz, float cx, float cy, float cz, float dx, float dy, float dz, Paint paint, float shade,
             int kind
         ) {
+            int group = group(ax, ay, az, bx, by, bz, cx, cy, cz);
+            this.buffer = this.buffers[group];
             if (this.buffer.remaining() < 4 * this.vertexSize) {
                 ByteBuffer bigger = ByteBuffer.allocateDirect(this.buffer.capacity() * 2).order(ByteOrder.nativeOrder());
                 this.buffer.flip();
                 bigger.put(this.buffer);
                 this.buffer = bigger;
-                SCRATCH.set(bigger);
+                this.buffers[group] = bigger;
             }
+            this.counts[group]++;
             int color = ARGB.scaleRGB(paint.color(), shade);
             int alpha = 255 - (kind | (paint.cutout() ? CUTOUT : 0) | (paint.water() ? TRANSLUCENT_WATER : 0));
+            this.cutout |= paint.cutout();
             this.vertex(ax, ay, az, color, alpha, paint);
             this.vertex(bx, by, bz, color, alpha, paint);
             this.vertex(cx, cy, cz, color, alpha, paint);
@@ -702,13 +764,46 @@ final class DetailMeshBuilder {
             }
         }
 
-        /** The quads written, in a buffer of their own: the scratch buffer is used again by the next tile. */
+        /** The quads written, group after group, in a buffer of their own: the scratch buffers are used again by the next tile. */
         ByteBuffer finish() {
-            this.buffer.flip();
-            ByteBuffer result = ByteBuffer.allocateDirect(this.buffer.remaining()).order(ByteOrder.nativeOrder());
-            result.put(this.buffer);
+            int bytes = 0;
+            for (ByteBuffer group : this.buffers) {
+                bytes += group.position();
+            }
+            ByteBuffer result = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+            for (ByteBuffer group : this.buffers) {
+                group.flip();
+                result.put(group);
+            }
             result.flip();
             return result;
+        }
+
+        /** First quad of every chunk in every group, group by group, plus the total; see {@link TileMesh#segments}. */
+        int[] segments() {
+            int[] segments = new int[TileMesh.GROUPS * this.chunks + 1];
+            int base = 0;
+            for (int g = 0; g < TileMesh.GROUPS; g++) {
+                for (int c = 0; c < this.chunks; c++) {
+                    segments[g * this.chunks + c] = base + this.chunkStarts[g * this.chunks + c];
+                }
+                base += this.counts[g];
+            }
+            segments[segments.length - 1] = base;
+            return segments;
+        }
+
+        /** First quad of the plants of every chunk, which come last in its part of {@link TileMesh#GROUP_OTHER}. */
+        int[] plantStarts() {
+            int base = 0;
+            for (int g = 0; g < TileMesh.GROUP_OTHER; g++) {
+                base += this.counts[g];
+            }
+            int[] starts = new int[this.chunks];
+            for (int c = 0; c < this.chunks; c++) {
+                starts[c] = base + this.plantStarts[c];
+            }
+            return starts;
         }
     }
 }

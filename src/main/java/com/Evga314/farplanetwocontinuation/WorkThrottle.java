@@ -37,8 +37,39 @@ public final class WorkThrottle {
         return urgency;
     }
 
-    /** A checkpoint of background work: pauses briefly while frames are late, less the more urgent loading is. */
+    /**
+     * A thread of the mod's background work, stopped by {@link #cancel} instead of an interrupt. An interrupt that hits a thread while
+     * it reads a file closes the file for every thread: if the file is a mod jar (structure templates of virtual chunks are read from
+     * one), Minecraft can no longer read the data packs in it and takes every world for damaged until the game is restarted.
+     */
+    public static final class Worker extends Thread {
+        private volatile boolean cancelled;
+
+        public Worker(Runnable task, String name) {
+            super(task, name);
+        }
+
+        /** The work running on this thread ends at its next checkpoint, and so does any work given to it later. */
+        public void cancel() {
+            this.cancelled = true;
+        }
+    }
+
+    /** Thrown at a checkpoint of a cancelled {@link Worker}. */
+    public static final class Cancelled extends RuntimeException {
+        Cancelled() {
+            super("Background work cancelled", null, false, false);
+        }
+    }
+
+    /**
+     * A checkpoint of background work: pauses briefly while frames are late, less the more urgent loading is. Work of a cancelled
+     * {@link Worker} ends here with {@link Cancelled}.
+     */
     public static void yieldToFrames() {
+        if (Thread.currentThread() instanceof Worker worker && worker.cancelled) {
+            throw new Cancelled();
+        }
         if (System.nanoTime() - slowUntil < 0L) {
             long pause = (long) (PAUSE_NS * (1.0F - urgency));
             if (pause > 0L) {

@@ -1,6 +1,7 @@
 package com.Evga314.farplanetwocontinuation.server;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
+import com.Evga314.farplanetwocontinuation.WorkThrottle;
 import com.Evga314.farplanetwocontinuation.config.ServerConfig;
 import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
 import com.Evga314.farplanetwocontinuation.tile.DetailData;
@@ -19,7 +20,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -71,6 +74,8 @@ public final class TileServer {
      * the tiles right around the player behind hundreds of distant rough tiles.
      */
     private final ThreadPoolExecutor detailExecutor;
+    /** Threads of both executors, cancelled when the server stops, see {@link WorkThrottle.Worker}. */
+    private final Set<WorkThrottle.Worker> workers = ConcurrentHashMap.newKeySet();
     private final ChunkSummaryCache chunkSummaries = new ChunkSummaryCache();
     private final VirtualChunkStore virtualChunks;
     private final @Nullable TileDiskCache diskCache;
@@ -91,8 +96,8 @@ public final class TileServer {
         this.config = config;
         int threads = config.resolvedThreads();
         // Detailed tiles are what the player sees up close, so they get the CPU before distant terrain; both stay below the game.
-        this.executor = createExecutor("FarPlane tile generator #", threads, Thread.MIN_PRIORITY);
-        this.detailExecutor = createExecutor("FarPlane detail reader #", config.resolvedDetailThreads(), Thread.NORM_PRIORITY - 1);
+        this.executor = createExecutor("FarPlane tile generator #", threads, Thread.MIN_PRIORITY, this.workers);
+        this.detailExecutor = createExecutor("FarPlane detail reader #", config.resolvedDetailThreads(), Thread.NORM_PRIORITY - 1, this.workers);
         this.diskCache = config.diskCache ? new TileDiskCache(server.getWorldPath(LevelResource.ROOT), server.overworld().getSeed()) : null;
         this.virtualChunks = new VirtualChunkStore(server.getWorldPath(LevelResource.ROOT), server.overworld().getSeed());
         int memoryLimit = config.memoryCacheTiles;
@@ -108,10 +113,19 @@ public final class TileServer {
         }
     }
 
-    private static ThreadPoolExecutor createExecutor(String name, int threads, int priority) {
+    private static final long CLOSE_WAIT_SECONDS = 5L;
+
+    private static ThreadPoolExecutor createExecutor(String name, int threads, int priority, Set<WorkThrottle.Worker> workers) {
         AtomicInteger counter = new AtomicInteger();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(threads, threads, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), runnable -> {
-            Thread thread = new Thread(runnable, name + counter.incrementAndGet());
+            WorkThrottle.Worker thread = new WorkThrottle.Worker(() -> {
+                try {
+                    runnable.run();
+                } finally {
+                    workers.remove((WorkThrottle.Worker) Thread.currentThread());
+                }
+            }, name + counter.incrementAndGet());
+            workers.add(thread);
             thread.setDaemon(true);
             thread.setPriority(priority);
             thread.setUncaughtExceptionHandler((t, e) -> LOGGER.error("Uncaught error in {}", t.getName(), e));
@@ -333,6 +347,8 @@ public final class TileServer {
             this.detailExecutor.execute(() -> {
                 try {
                     this.produceDetail(running.level, tile, loaded, this.virtualChunks);
+                } catch (WorkThrottle.Cancelled e) {
+                    return;
                 } catch (Exception e) {
                     LOGGER.warn("Failed to pre-generate detailed tile {}", tile, e);
                 }
@@ -467,6 +483,8 @@ public final class TileServer {
                         if (ServerPerf.ON) {
                             (job.detail() ? ServerPerf.DETAIL : ServerPerf.ROUGH).add(System.nanoTime() - start);
                         }
+                    } catch (WorkThrottle.Cancelled e) {
+                        return;
                     } catch (Exception e) {
                         LOGGER.warn("Failed to generate tile {} in {}", job.pos(), dimension.identifier(), e);
                     }
@@ -617,9 +635,24 @@ public final class TileServer {
         this.pump(player, state);
     }
 
+    /**
+     * Stops all work without interrupting it (see {@link WorkThrottle.Worker}): queued jobs are dropped, running ones end at their
+     * next checkpoint. Waits a few seconds for them, so nothing is written to the world folder after the world is closed.
+     */
     public void close() {
-        this.executor.shutdownNow();
-        this.detailExecutor.shutdownNow();
+        this.workers.forEach(WorkThrottle.Worker::cancel);
+        this.executor.getQueue().clear();
+        this.detailExecutor.getQueue().clear();
+        this.executor.shutdown();
+        this.detailExecutor.shutdown();
+        try {
+            if (!this.executor.awaitTermination(CLOSE_WAIT_SECONDS, TimeUnit.SECONDS)
+                || !this.detailExecutor.awaitTermination(CLOSE_WAIT_SECONDS, TimeUnit.SECONDS)) {
+                LOGGER.warn("FarPlane background work did not stop in time");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         this.players.clear();
         this.chunkSummaries.clear();
         this.virtualChunks.clear();

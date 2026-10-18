@@ -15,9 +15,15 @@ import net.minecraft.world.level.chunk.status.ChunkStep;
  * reaches the real world: vanilla also registers points of interest (beds, bells, workstations) with the level, which would leave
  * phantom village blocks in the save for chunks that were never generated.
  */
-final class VirtualRegion extends WorldGenRegion {
+public final class VirtualRegion extends WorldGenRegion {
     VirtualRegion(ServerLevel level, StaticCache2D<GenerationChunkHolder> cache, ChunkStep step, ChunkAccess center) {
         super(level, cache, step, center);
+    }
+
+    /** Blocks out of reach are skipped like vanilla does, without vanilla's error in the log for each of them. */
+    @Override
+    public boolean ensureCanWrite(BlockPos pos) {
+        return this.isWithinWriteZone(pos) && super.ensureCanWrite(pos);
     }
 
     @Override

@@ -144,6 +144,13 @@ are generated for it, the number of generator threads, the request queue per pla
     frames, so loading never stalls a frame. When frames run late, the background work of the mod pauses for a moment and leaves
     the CPU to the game. How much it holds back follows the player's speed (see Loading While Moving): walking, frames come first;
     flying fast, terrain loads at full speed in the direction of flight.
+11. Only what can be seen is sent to the GPU. Tiles off screen are skipped, and of detailed tiles on the edge of the screen only the
+    chunks on screen are drawn. Terrain hides what is behind it: walking from near to far, the ground raises a horizon around the
+    camera, and rough tiles and chunks of detailed tiles that lie completely below it are not drawn at all (behind hills and
+    mountains, in valleys and pits). This only depends on where the camera is, so turning around never shows anything missing, and
+    it errs on the side of drawing too much. The faces of detailed tiles are stored by the way they face, and those turned away from
+    the camera are not drawn either (like Sodium does). Tiles with nothing cut away are drawn with a shader that never drops a fragment, which
+    lets the GPU skip hidden fragments early (on Adreno phones it is what enables their early depth test).
 
 ## Phones (MojoLauncher)
 

@@ -71,6 +71,9 @@ public final class PerfLog {
     private static long uploadBytes;
     private static long renderNs;
     private static int draws;
+    /** Triangles drawn this frame, by every pass of the LOD terrain. */
+    private static long triangles;
+    private static long trianglesSum;
     private static long uploadNsSum;
     private static long uploadNsMax;
     private static int uploadsSum;
@@ -97,6 +100,10 @@ public final class PerfLog {
     // Client tick.
     private static long tickNsSum;
     private static long tickNsMax;
+    private static long horizonNsSum;
+    private static long horizonNsMax;
+    private static boolean occlusionOff;
+    private static long occlusionCheckedAt;
     private static int ticks;
     private static @Nullable Map<String, String> lastSettings;
     // Mesh builder threads.
@@ -146,6 +153,7 @@ public final class PerfLog {
         uploadBytes = 0L;
         renderNs = 0L;
         draws = 0;
+        triangles = 0L;
         frameGcCount = 0L;
         frameGcTime = 0L;
         if (now - summaryStart >= SUMMARY_NS) {
@@ -171,17 +179,49 @@ public final class PerfLog {
         renderNsSum += nanos;
         renderNsMax = Math.max(renderNsMax, renderNs);
         drawsSum += draws;
+        trianglesSum += triangles;
         drawsMax = Math.max(drawsMax, draws);
     }
 
-    public static void draw() {
+    public static void draw(int indices) {
         draws++;
+        triangles += indices / 3;
     }
 
     public static void tickTime(long nanos) {
         ticks++;
         tickNsSum += nanos;
         tickNsMax = Math.max(tickNsMax, nanos);
+    }
+
+    /**
+     * Whether terrain occlusion culling is turned off to compare: with -Dfarplane.noOcclusion=true, or in the debug build while a file
+     * {@code config/farplane-no-occlusion} exists, which can be created and removed while the game runs. The file is looked for once a
+     * second.
+     */
+    public static boolean occlusionOff() {
+        if (Boolean.getBoolean("farplane.noOcclusion")) {
+            return true;
+        }
+        if (!ON) {
+            return false;
+        }
+        long now = System.nanoTime();
+        if (now - occlusionCheckedAt > 1_000_000_000L) {
+            occlusionCheckedAt = now;
+            boolean off = java.nio.file.Files.exists(FabricLoader.getInstance().getConfigDir().resolve("farplane-no-occlusion"));
+            if (off != occlusionOff) {
+                occlusionOff = off;
+                LOGGER.info("[FarPlane perf] terrain occlusion culling {}", off ? "OFF" : "ON");
+            }
+        }
+        return occlusionOff;
+    }
+
+    /** Time of the terrain occlusion culling in a tick, see Horizon. */
+    public static void horizonTime(long nanos) {
+        horizonNsSum += nanos;
+        horizonNsMax = Math.max(horizonNsMax, nanos);
     }
 
     public static void meshBuilt(long nanos) {
@@ -291,8 +331,8 @@ public final class PerfLog {
             seconds, frameCount, frameCount / seconds, percentile(sorted, 0.5), percentile(sorted, 0.95), percentile(sorted, 0.99),
             sorted.length == 0 ? 0.0 : sorted[sorted.length - 1] / 1e6, over33, spikes));
         int frames = Math.max(1, frameCount);
-        line.append(String.format(Locale.ROOT, " | lod pass cpu avg %.2f max %.1f ms, draws avg %d max %d",
-            renderNsSum / 1e6 / frames, renderNsMax / 1e6, drawsSum / frames, drawsMax));
+        line.append(String.format(Locale.ROOT, " | lod pass cpu avg %.2f max %.1f ms, draws avg %d max %d, triangles avg %dk",
+            renderNsSum / 1e6 / frames, renderNsMax / 1e6, drawsSum / frames, drawsMax, trianglesSum / frames / 1000));
         if (gpuSamples > 0) {
             line.append(String.format(Locale.ROOT, ", gpu avg %.2f max %.1f ms", gpuNsSum / 1e6 / gpuSamples, gpuNsMax / 1e6));
         } else if (!gpuFailed) {
@@ -300,6 +340,8 @@ public final class PerfLog {
         }
         line.append(String.format(Locale.ROOT, " | upload %d tiles %.1f MB, max %.1f ms/frame | client tick avg %.2f max %.1f ms",
             uploadsSum, uploadBytesSum / 1048576.0, uploadNsMax / 1e6, ticks == 0 ? 0.0 : tickNsSum / 1e6 / ticks, tickNsMax / 1e6));
+        line.append(String.format(Locale.ROOT, " (occlusion %s avg %.2f max %.1f ms)", occlusionOff ? "OFF" : "on",
+            ticks == 0 ? 0.0 : horizonNsSum / 1e6 / ticks, horizonNsMax / 1e6));
         long built = meshes.getAndSet(0L);
         line.append(String.format(Locale.ROOT, " | meshes built %d, avg %.1f max %.1f ms",
             built, built == 0 ? 0.0 : meshNs.getAndSet(0L) / 1e6 / built, meshNsMax.getAndSet(0L) / 1e6));
@@ -335,12 +377,15 @@ public final class PerfLog {
         renderNsSum = 0L;
         renderNsMax = 0L;
         drawsSum = 0L;
+        trianglesSum = 0L;
         drawsMax = 0;
         gpuNsSum = 0L;
         gpuNsMax = 0L;
         gpuSamples = 0;
         tickNsSum = 0L;
         tickNsMax = 0L;
+        horizonNsSum = 0L;
+        horizonNsMax = 0L;
         ticks = 0;
     }
 

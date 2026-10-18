@@ -63,6 +63,9 @@ abstract class LodLayer {
     private List<TileMesh> drawList = List.of();
     private int epoch;
     private @Nullable PartialUpload partial;
+    /** Tiles asked for and tiles dropped for memory since the start, for the debug screen: both grow steadily when tiles thrash. */
+    private long requested;
+    private long evicted;
 
     private final ArrayList<TileMesh> nextDrawList = new ArrayList<>();
     private final LongOpenHashSet allowedSplits = new LongOpenHashSet();
@@ -164,7 +167,8 @@ abstract class LodLayer {
             bytes += mesh.bytes;
         }
         return this.name + ": tiles=" + this.meshes.size() + " (" + (bytes >> 20) + " MB) drawn=" + this.drawList.size() + " pending="
-            + this.pending.size() + " building=" + this.building.size() + " empty=" + this.empty.size() + " wanted=" + this.candidates.size();
+            + this.pending.size() + " building=" + this.building.size() + " empty=" + this.empty.size() + " wanted=" + this.candidates.size()
+            + " requested=" + this.requested + " evicted=" + this.evicted;
     }
 
     boolean hasWork() {
@@ -596,6 +600,7 @@ abstract class LodLayer {
                 requests[i * 3 + 1] = pos.x();
                 requests[i * 3 + 2] = pos.z();
                 this.pending.put(key, now);
+                this.requested++;
             }
             this.sendRequests(requests);
             sent += batch;
@@ -621,6 +626,7 @@ abstract class LodLayer {
             }
             this.meshes.remove(mesh.pos.pack());
             mesh.close();
+            this.evicted++;
         }
     }
 

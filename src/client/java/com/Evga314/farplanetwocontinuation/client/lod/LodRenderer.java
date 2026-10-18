@@ -84,6 +84,21 @@ public final class LodRenderer {
             .build()
     );
 
+    /** Rough tiles with nothing cut away, see {@link TileMesh#solid}. */
+    public static final RenderPipeline SOLID_PIPELINE = RenderPipelines.registerOptional(
+        RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
+            .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_solid"))
+            .withVertexShader(SHADER)
+            .withFragmentShader(SHADER)
+            .withShaderDefine("NO_DISCARD")
+            .withVertexBinding(0, DefaultVertexFormat.POSITION_COLOR)
+            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+            .withColorTargetState(ColorTargetState.DEFAULT)
+            .withDepthStencilState(DepthStencilState.DEFAULT)
+            .withCull(false)
+            .build()
+    );
+
     /** Writes only depth, converted to vanilla's projection, for tiles beyond the vanilla render distance. */
     public static final RenderPipeline DEPTH_PIPELINE = RenderPipelines.registerOptional(
         RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
@@ -129,6 +144,36 @@ public final class LodRenderer {
             .withVertexShader(SHADER)
             .withFragmentShader(SHADER)
             .withShaderDefine("TEXTURED")
+            .withBindGroupLayout(BindGroupLayouts.SAMPLER0)
+            .withVertexBinding(0, TEXTURED_FORMAT)
+            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+            .withColorTargetState(ColorTargetState.DEFAULT)
+            .withDepthStencilState(DepthStencilState.DEFAULT)
+            .withCull(true)
+            .build()
+    );
+
+    public static final RenderPipeline DETAIL_SOLID_PIPELINE = RenderPipelines.registerOptional(
+        RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
+            .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_detail_solid"))
+            .withVertexShader(SHADER)
+            .withFragmentShader(SHADER)
+            .withShaderDefine("NO_DISCARD")
+            .withVertexBinding(0, DefaultVertexFormat.POSITION_COLOR)
+            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+            .withColorTargetState(ColorTargetState.DEFAULT)
+            .withDepthStencilState(DepthStencilState.DEFAULT)
+            .withCull(true)
+            .build()
+    );
+
+    public static final RenderPipeline DETAIL_TEXTURED_SOLID_PIPELINE = RenderPipelines.registerOptional(
+        RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
+            .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_detail_textured_solid"))
+            .withVertexShader(SHADER)
+            .withFragmentShader(SHADER)
+            .withShaderDefine("TEXTURED")
+            .withShaderDefine("NO_DISCARD")
             .withBindGroupLayout(BindGroupLayouts.SAMPLER0)
             .withVertexBinding(0, TEXTURED_FORMAT)
             .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
@@ -233,6 +278,11 @@ public final class LodRenderer {
     private final Matrix4f bobMatrix = new Matrix4f();
     private final Matrix4f cullMatrix = new Matrix4f();
     private final FrustumIntersection frustum = new FrustumIntersection();
+    /** Scratch for {@link #frameRanges}, only used on the render thread. */
+    private boolean[] onScreen = new boolean[256];
+    private final boolean[] groupsSeen = new boolean[TileMesh.GROUPS];
+    /** Culling is turned off this frame, see {@link PerfLog#occlusionOff()}. */
+    private boolean cullingOff;
     private final List<TileMesh> visible = new ArrayList<>();
     private final List<TileMesh> depthTiles = new ArrayList<>();
 
@@ -299,8 +349,10 @@ public final class LodRenderer {
         double farthest = 0.0;
         int maxQuads = 0;
         double vanillaFar = camera.depthFar;
+        boolean end = minecraft.level != null && DimensionKind.of(minecraft.level) == DimensionKind.END;
+        this.cullingOff = PerfLog.occlusionOff();
         for (TileMesh mesh : this.manager.drawList()) {
-            if (mesh.vertices.isClosed()) {
+            if (mesh.vertices.isClosed() || mesh.occluded) {
                 continue;
             }
             double minX = mesh.pos.minX() - camX;
@@ -308,9 +360,15 @@ public final class LodRenderer {
             double size = mesh.pos.size();
             double minY = mesh.minY - camY;
             double maxY = mesh.maxY - camY;
-            if (!this.frustum.testAab((float) minX, (float) minY, (float) minZ, (float) (minX + size), (float) maxY, (float) (minZ + size))) {
+            int inFrustum = this.frustum.intersectAab((float) minX, (float) minY, (float) minZ, (float) (minX + size), (float) maxY, (float) (minZ + size));
+            if (inFrustum >= 0) {
                 continue;
             }
+            mesh.frameRanges = null;
+            if (mesh.segments != null && !this.frameRanges(mesh, inFrustum == FrustumIntersection.INTERSECT, minX, minY, minZ, maxY)) {
+                continue;
+            }
+            mesh.solid = isSolid(mesh, camX, camZ, end);
             this.visible.add(mesh);
             double dx = Math.max(0.0, Math.max(minX, -(minX + size)));
             double dy = Math.max(0.0, Math.max(minY, -maxY));
@@ -426,7 +484,12 @@ public final class LodRenderer {
             pass.setPipeline(pipeline);
             pass.setUniform("Projection", projection);
             pass.setUniform("Fog", fog);
-            Pipelines pipelines = new Pipelines(pipeline, this.compiledPipeline(DETAIL_PIPELINE), this.compiledPipeline(DETAIL_TEXTURED_PIPELINE), true, false, false);
+            Pipelines pipelines = new Pipelines(
+                pipeline, this.compiledPipeline(DETAIL_PIPELINE), this.compiledPipeline(DETAIL_TEXTURED_PIPELINE), true, false, false,
+                new CompiledRenderPipeline[] {
+                    this.compiledPipeline(SOLID_PIPELINE), this.compiledPipeline(DETAIL_SOLID_PIPELINE), this.compiledPipeline(DETAIL_TEXTURED_SOLID_PIPELINE)
+                }
+            );
             this.drawAll(pass, this.visible, transformSlices, clippedSlices, roughIndices, quadIndices, pipelines);
             if (this.visible.stream().anyMatch(mesh -> mesh.fadeWidth > 0.0F)) {
                 // The fading edge of the detailed tiles, blended over the rough terrain drawn under it.
@@ -528,9 +591,21 @@ public final class LodRenderer {
      */
     private record Pipelines(
         @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
-        boolean waterOnly, boolean fadeOnly
+        boolean waterOnly, boolean fadeOnly, @Nullable CompiledRenderPipeline @Nullable [] solid
     ) {
-        @Nullable CompiledRenderPipeline of(int kind) {
+        Pipelines(
+            @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
+            boolean waterOnly, boolean fadeOnly
+        ) {
+            this(rough, detail, textured, bindAtlas, waterOnly, fadeOnly, null);
+        }
+
+        /** The pipeline of a {@link #drawKind}: the one that never drops fragments for solid tiles, where this pass has one. */
+        @Nullable CompiledRenderPipeline of(int drawKind) {
+            int kind = drawKind / 2;
+            if (drawKind % 2 == 0 && this.solid != null && this.solid[kind] != null) {
+                return this.solid[kind];
+            }
             return kind == KIND_ROUGH ? this.rough : kind == KIND_DETAIL ? this.detail : this.textured;
         }
     }
@@ -538,8 +613,107 @@ public final class LodRenderer {
     /** Marks a transform of the depth pass as one of a chunk vanilla draws partly, see writeVanillaDepth and the shader. */
     private static final float CLIPPED_DEPTH = -1000.0F;
 
-    private static final Comparator<TileMesh> DRAW_ORDER = Comparator.<TileMesh>comparingInt(mesh -> !mesh.detail ? 2 : mesh.textured ? 0 : 1)
+    private static final Comparator<TileMesh> DRAW_ORDER = Comparator.<TileMesh>comparingInt(LodRenderer::drawKind)
         .thenComparingDouble(mesh -> mesh.sortDistance);
+
+    /** Which pipeline a tile is drawn with; solid tiles of a kind come first, they hide the most for the depth test. */
+    private static int drawKind(TileMesh mesh) {
+        int kind = !mesh.detail ? KIND_ROUGH : mesh.textured ? KIND_TEXTURED : KIND_DETAIL;
+        return kind * 2 + (mesh.solid ? 0 : 1);
+    }
+
+    /**
+     * Whether nothing of a tile is cut away this frame: no part closer than its inner cut or past its outer cut, no sections vanilla
+     * draws, no translucent water or textures with gaps, no void between islands (the End).
+     */
+    private static boolean isSolid(TileMesh mesh, double camX, double camZ, boolean end) {
+        if (end || mesh.clippedChunks != null || mesh.detail && (mesh.hasWater || mesh.textured && mesh.hasCutout)) {
+            return false;
+        }
+        if (mesh.discardRadius > 0.0F && mesh.pos.distanceTo(camX, camZ) < mesh.discardRadius) {
+            return false;
+        }
+        return mesh.keepRadius <= 0.0F || mesh.pos.farthestDistanceTo(camX, camZ) <= mesh.keepRadius - mesh.fadeWidth;
+    }
+
+    /**
+     * What of a detailed tile is drawn this frame, in {@link TileMesh#frameRanges}: its faces turned away from the camera are left out,
+     * and on the edge of the screen its chunks off screen. Returns whether anything of it is left.
+     *
+     * @param edge the tile is only partly on screen
+     */
+    private boolean frameRanges(TileMesh mesh, boolean edge, double minX, double minY, double minZ, double maxY) {
+        int[] segments = mesh.segments;
+        int side = mesh.chunksPerSide();
+        int chunks = side * side;
+        double size = mesh.pos.size();
+        // A face can only be seen from in front of its plane, and all faces of a group lie within the tile: once the camera is past
+        // the tile on one side, the faces of the group looking the other way all turn their backs to it.
+        boolean[] groups = this.groupsSeen;
+        groups[TileMesh.GROUP_UP] = minY < 0.0;
+        groups[TileMesh.GROUP_DOWN] = maxY > 0.0;
+        groups[TileMesh.GROUP_NORTH] = minZ + size > 0.0;
+        groups[TileMesh.GROUP_SOUTH] = minZ < 0.0;
+        groups[TileMesh.GROUP_WEST] = minX + size > 0.0;
+        groups[TileMesh.GROUP_EAST] = minX < 0.0;
+        groups[TileMesh.GROUP_OTHER] = true;
+        if (this.cullingOff) {
+            // Turned off together with the occlusion culling, to compare.
+            java.util.Arrays.fill(groups, true);
+        }
+        boolean anyGroupOff = false;
+        for (boolean seen : groups) {
+            anyGroupOff |= !seen;
+        }
+        if (this.onScreen.length < chunks) {
+            this.onScreen = new boolean[chunks];
+        }
+        boolean anyOff = false;
+        boolean anyOn = !edge;
+        for (int c = 0; c < chunks; c++) {
+            boolean on = true;
+            if (edge) {
+                float x = (float) (minX + (c % side) * 16.0);
+                float z = (float) (minZ + (c / side) * 16.0);
+                on = this.frustum.testAab(x, (float) minY, z, x + 16.0F, (float) maxY, z + 16.0F);
+                anyOff |= !on;
+                anyOn |= on;
+            }
+            this.onScreen[c] = on;
+        }
+        if (!anyOn) {
+            return false;
+        }
+        if (!anyOff && !anyGroupOff) {
+            return true;
+        }
+        int[] base = mesh.drawRanges != null ? mesh.drawRanges : new int[] {0, mesh.indexCount};
+        int[] ranges = new int[base.length + chunks * TileMesh.GROUPS * 2];
+        int count = 0;
+        int lastSegment = chunks * TileMesh.GROUPS;
+        for (int r = 0; r + 1 < base.length; r += 2) {
+            int start = base[r];
+            int stop = start + base[r + 1];
+            // The segment holding the first index. Empty segments share their first quad with the next one; the walk steps over them.
+            int found = java.util.Arrays.binarySearch(segments, 0, lastSegment, start / 6);
+            int segment = found >= 0 ? found : Math.max(0, -found - 2);
+            while (start < stop && segment < lastSegment) {
+                int pieceEnd = Math.min(stop, segments[segment + 1] * 6);
+                if (pieceEnd > start && groups[segment / chunks] && this.onScreen[segment % chunks]) {
+                    if (count > 0 && ranges[count - 2] + ranges[count - 1] == start) {
+                        ranges[count - 1] += pieceEnd - start;
+                    } else {
+                        ranges[count++] = start;
+                        ranges[count++] = pieceEnd - start;
+                    }
+                }
+                start = Math.max(start, pieceEnd);
+                segment++;
+            }
+        }
+        mesh.frameRanges = java.util.Arrays.copyOf(ranges, count);
+        return count > 0 || mesh.clippedChunks != null;
+    }
 
     private static final int KIND_ROUGH = 0;
     private static final int KIND_DETAIL = 1;
@@ -552,7 +726,7 @@ public final class LodRenderer {
         int bound = -1;
         for (int i = 0; i < transforms.length; i++) {
             TileMesh mesh = meshes.get(i);
-            int kind = !mesh.detail ? KIND_ROUGH : mesh.textured ? KIND_TEXTURED : KIND_DETAIL;
+            int kind = drawKind(mesh);
             CompiledRenderPipeline pipeline = pipelines.of(kind);
             if (pipeline == null || mesh.detail && quadIndices == null || pipelines.waterOnly() && !mesh.hasWater
                 || pipelines.fadeOnly() && mesh.fadeWidth <= 0.0F) {
@@ -565,7 +739,7 @@ public final class LodRenderer {
                 } else {
                     pass.setIndexBuffer(roughIndices, IndexType.SHORT);
                 }
-                if (kind == KIND_TEXTURED && pipelines.bindAtlas()) {
+                if (mesh.textured && pipelines.bindAtlas()) {
                     GpuTextureView atlas = Minecraft.getInstance().getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS).getTextureView();
                     pass.setUniform("Sampler0", atlas, this.atlasSampler());
                 }
@@ -573,17 +747,17 @@ public final class LodRenderer {
             }
             pass.setUniform("DynamicTransforms", transforms[i]);
             pass.setVertexBuffer(0, mesh.vertices.slice());
-            int[] ranges = mesh.drawRanges;
+            int[] ranges = mesh.frameRanges != null ? mesh.frameRanges : mesh.drawRanges;
             if (ranges == null) {
                 pass.drawIndexed(mesh.indexCount, 1, 0, 0, 0);
                 if (PerfLog.ON) {
-                    PerfLog.draw();
+                    PerfLog.draw(mesh.indexCount);
                 }
             } else {
                 for (int r = 0; r + 1 < ranges.length; r += 2) {
                     pass.drawIndexed(ranges[r + 1], 1, ranges[r], 0, 0);
                     if (PerfLog.ON) {
-                        PerfLog.draw();
+                        PerfLog.draw(ranges[r + 1]);
                     }
                 }
             }
@@ -593,7 +767,7 @@ public final class LodRenderer {
                     pass.setUniform("DynamicTransforms", clippedTransforms[i][c]);
                     pass.drawIndexed(clipped[c * 4 + 1], 1, clipped[c * 4], 0, 0);
                     if (PerfLog.ON) {
-                        PerfLog.draw();
+                        PerfLog.draw(clipped[c * 4 + 1]);
                     }
                 }
             }

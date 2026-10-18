@@ -50,12 +50,12 @@ public final class TileMeshBuilder {
 
     public record Built(
         long key, int epoch, @Nullable ByteBuffer vertices, float minY, float maxY, float terrainMinY, short @Nullable [] heights, int indexCount,
-        boolean detail, long coverage, boolean complete, int @Nullable [] chunkQuads, int @Nullable [] chunkSurfaces, boolean textured,
-        boolean hasWater, int @Nullable [] chunkPlants
+        boolean detail, long coverage, boolean complete, int @Nullable [] segments, int @Nullable [] chunkSurfaces, boolean textured,
+        boolean hasWater, int @Nullable [] chunkPlants, boolean hasCutout
     ) {
         /** A tile whose data could not be used; it is dropped quietly. */
         static Built failed(long key, int epoch) {
-            return new Built(key, epoch, null, 0.0F, 0.0F, 0.0F, null, 0, false, 0L, false, null, null, false, false, null);
+            return new Built(key, epoch, null, 0.0F, 0.0F, 0.0F, null, 0, false, 0L, false, null, null, false, false, null, false);
         }
     }
 
@@ -137,7 +137,7 @@ public final class TileMeshBuilder {
             }
         }
         buffer.flip();
-        return new Built(key, epoch, buffer, minY - skirtDepth, maxY, minY, data.heights.clone(), INDEX_COUNT, false, 0L, true, null, null, false, false, null);
+        return new Built(key, epoch, buffer, minY - skirtDepth, maxY, minY, data.heights.clone(), INDEX_COUNT, false, 0L, true, null, null, false, false, null, false);
     }
 
     /** Box filter over the sub-samples of a coarse cell, so a cell that is 30% islands looks like a slightly greener sea. */

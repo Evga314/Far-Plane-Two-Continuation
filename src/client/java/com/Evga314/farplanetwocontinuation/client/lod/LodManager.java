@@ -9,7 +9,11 @@ import com.mojang.logging.LogUtils;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -60,6 +64,19 @@ public final class LodManager {
     private final ClientConfig config;
     private double detailRingRadius;
     private double canopyStart;
+    /** Terrain occlusion culling runs on a thread of its own, see {@link #cullHidden}. */
+    private final ExecutorService cullExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "FarPlane occlusion culling");
+        thread.setDaemon(true);
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
+        return thread;
+    });
+    private @Nullable CompletableFuture<Horizon.Result> cullJob;
+    private Horizon.@Nullable Result cullResult;
+    /** Camera position of the last tick, to know how fast it moves. */
+    private double cullCamX;
+    private double cullCamY;
+    private double cullCamZ;
     private final ThreadPoolExecutor meshExecutor;
     private final LodView view;
     private final RoughLayer rough;
@@ -146,7 +163,8 @@ public final class LodManager {
     }
 
     public String debugStats() {
-        return this.rough.stats() + " | " + this.detail.stats();
+        Horizon.Result result = this.cullResult;
+        return this.rough.stats() + " | " + this.detail.stats() + " | " + (result == null ? "hidden none" : result.stats());
     }
 
     public int meshCount() {
@@ -206,6 +224,7 @@ public final class LodManager {
         this.rough.reset();
         this.detail.reset();
         this.drawList = List.of();
+        this.cullResult = null;
     }
 
     public void onTileData(FarPlanePayloads.TileDataPayload payload) {
@@ -354,7 +373,6 @@ public final class LodManager {
                 boolean edge = mesh.pos.farthestDistanceTo(this.view.camX, this.view.camZ) > ringRadius - fade;
                 mesh.keepRadius = edge ? (float) ringRadius : 0.0F;
                 mesh.fadeWidth = edge ? (float) fade : 0.0F;
-                this.vanillaFreeRanges(mesh);
             }
         } else if (this.detail.hasWork()) {
             this.detail.reset();
@@ -369,6 +387,12 @@ public final class LodManager {
         }
         for (TileMesh mesh : this.rough.drawList()) {
             mesh.discardRadius = Math.max(mesh.discardRadius, (float) this.fullyDrawnRadius);
+        }
+        this.cullHidden(ringRadius);
+        if (ringRadius > 0.0) {
+            for (TileMesh mesh : this.detail.drawList()) {
+                this.vanillaFreeRanges(mesh);
+            }
         }
         this.activeLodDistance = (int) Math.min(this.rough.reach(), Integer.MAX_VALUE);
 
@@ -390,6 +414,62 @@ public final class LodManager {
     }
 
     /**
+     * Leaves out what terrain closer to the camera hides, see {@link Horizon}. Not in the End: its islands float over the void, and
+     * the ground under them does not hide anything.
+     * <p>
+     * The culling runs on a background thread from a copy of this tick; its result is used from the next tick on, as long as the
+     * camera stays within the margin it was made with. Its margin covers twice the distance of the last tick: until the next result
+     * comes, and until the frame drawn just before the next tick.
+     */
+    private void cullHidden(double ringRadius) {
+        double moved = Math.sqrt(Mth.square(this.view.camX - this.cullCamX) + Mth.square(this.view.camY - this.cullCamY)
+            + Mth.square(this.view.camZ - this.cullCamZ));
+        this.cullCamX = this.view.camX;
+        this.cullCamY = this.view.camY;
+        this.cullCamZ = this.view.camZ;
+        List<TileMesh> detailTiles = ringRadius > 0.0 ? this.detail.drawList() : List.of();
+        boolean off = this.config.dimension == DimensionKind.END || PerfLog.occlusionOff();
+        if (this.cullJob != null && this.cullJob.isDone()) {
+            this.cullResult = this.cullJob.getNow(null);
+            this.cullJob = null;
+            if (PerfLog.ON && this.cullResult != null) {
+                PerfLog.horizonTime(this.cullResult.nanos());
+            }
+        }
+        Horizon.Result result = off ? null : this.cullResult;
+        if (result != null) {
+            double away = Math.sqrt(Mth.square(this.view.camX - result.camX()) + Mth.square(this.view.camY - result.camY())
+                + Mth.square(this.view.camZ - result.camZ()));
+            // Until the next tick the camera moves about as far again.
+            if (away + moved > result.margin()) {
+                result = null;
+            }
+        }
+        for (TileMesh mesh : detailTiles) {
+            mesh.occluded = result != null && result.occluded().containsKey(mesh);
+            mesh.hiddenChunks = result == null ? null : result.hiddenChunks().get(mesh);
+        }
+        for (TileMesh mesh : this.rough.drawList()) {
+            mesh.occluded = result != null && result.occluded().containsKey(mesh);
+        }
+        if (off) {
+            this.cullResult = null;
+            return;
+        }
+        if (this.cullJob == null) {
+            Horizon.Job job = Horizon.snapshot(this.view, detailTiles, this.rough.drawList(), ringRadius, HIDDEN_MARGIN + 4.0 * Math.min(moved, 64.0));
+            try {
+                this.cullJob = CompletableFuture.supplyAsync(job::run, this.cullExecutor);
+            } catch (RejectedExecutionException e) {
+                this.cullJob = null;
+            }
+        }
+    }
+
+    /** Blocks the camera may move before culling is done again, on top of twice the distance of the last tick. */
+    private static final double HIDDEN_MARGIN = 2.0;
+
+    /**
      * Detailed blocks under vanilla chunks would show through the gaps of grass and leaves as ghost blocks, so the chunks of a tile
      * that vanilla already draws are left out. Chunks vanilla draws only partly, seen from high above for example, are drawn without
      * the layer vanilla draws.
@@ -397,17 +477,24 @@ public final class LodManager {
     private void vanillaFreeRanges(TileMesh mesh) {
         mesh.drawRanges = null;
         mesh.clippedChunks = null;
-        int[] chunkQuads = mesh.chunkQuads;
+        int[] segments = mesh.segments;
         int[] surfaces = mesh.chunkSurfaces;
         int[] plants = mesh.chunkPlants;
-        if (chunkQuads == null || surfaces == null) {
+        boolean[] hidden = mesh.hiddenChunks;
+        if (segments == null || surfaces == null) {
             return;
+        }
+        boolean anyHidden = false;
+        if (hidden != null) {
+            for (boolean chunkHidden : hidden) {
+                anyHidden |= chunkHidden;
+            }
         }
         boolean nearVanilla = mesh.pos.distanceTo(this.view.camX, this.view.camZ) <= this.view.vanillaRadius + 32.0;
         // Grass and flowers are only drawn a little beyond vanilla's chunks; farther out they are too small to see.
         double plantReach = Math.max(PLANT_MIN_REACH, this.view.vanillaRadius + PLANT_REACH_BEYOND_VANILLA);
         boolean cutPlants = plants != null && mesh.pos.farthestDistanceTo(this.view.camX, this.view.camZ) > plantReach;
-        if (!nearVanilla && !cutPlants) {
+        if (!nearVanilla && !cutPlants && !anyHidden) {
             return;
         }
         int side = mesh.chunksPerSide();
@@ -430,9 +517,14 @@ public final class LodManager {
             } else {
                 coverage[chunk] = LodView.Coverage.NONE;
             }
+            if (hidden != null && hidden[chunk]) {
+                // Hidden behind terrain: drawn neither in full nor clipped.
+                coverage[chunk] = LodView.Coverage.FULL;
+                anyCut = true;
+            }
             allNone &= coverage[chunk] == LodView.Coverage.NONE;
             anyPartial |= coverage[chunk] == LodView.Coverage.PARTIAL;
-            ends[chunk] = chunkQuads[chunk + 1];
+            ends[chunk] = segments[TileMesh.GROUP_OTHER * side * side + chunk + 1];
             if (cutPlants) {
                 double dx = chunkX * 16.0 + 8.0 - this.view.camX;
                 double dz = chunkZ * 16.0 + 8.0 - this.view.camZ;
@@ -445,49 +537,59 @@ public final class LodManager {
         if (allNone && !anyCut) {
             return;
         }
-        mesh.drawRanges = ranges(chunkQuads, ends, coverage, LodView.Coverage.NONE);
+        mesh.drawRanges = ranges(segments, ends, coverage, LodView.Coverage.NONE);
         if (anyPartial) {
-            int[] clipped = new int[side * side * 4];
+            int chunks = side * side;
+            int[] clipped = new int[chunks * TileMesh.GROUPS * 4];
             int count = 0;
-            for (int chunk = 0; chunk < side * side; chunk++) {
-                if (coverage[chunk] != LodView.Coverage.PARTIAL) {
-                    continue;
+            for (int group = 0; group < TileMesh.GROUPS; group++) {
+                for (int chunk = 0; chunk < chunks; chunk++) {
+                    int segment = group * chunks + chunk;
+                    if (coverage[chunk] != LodView.Coverage.PARTIAL || segments[segment + 1] <= segments[segment]) {
+                        continue;
+                    }
+                    int first = segments[segment] * 6;
+                    int length = (segments[segment + 1] - segments[segment]) * 6;
+                    if (count > 0 && clipped[count - 2] == masks[chunk] && clipped[count - 1] == lowest[chunk]
+                        && clipped[count - 4] + clipped[count - 3] == first) {
+                        // The next chunk in the buffer with the same sections drawn: one draw for both.
+                        clipped[count - 3] += length;
+                        continue;
+                    }
+                    clipped[count++] = first;
+                    clipped[count++] = length;
+                    clipped[count++] = masks[chunk];
+                    clipped[count++] = lowest[chunk];
                 }
-                int first = chunkQuads[chunk] * 6;
-                int length = (chunkQuads[chunk + 1] - chunkQuads[chunk]) * 6;
-                if (count > 0 && clipped[count - 2] == masks[chunk] && clipped[count - 1] == lowest[chunk]
-                    && clipped[count - 4] + clipped[count - 3] == first) {
-                    // The next chunk in the buffer with the same sections drawn: one draw for both.
-                    clipped[count - 3] += length;
-                    continue;
-                }
-                clipped[count++] = first;
-                clipped[count++] = length;
-                clipped[count++] = masks[chunk];
-                clipped[count++] = lowest[chunk];
             }
             mesh.clippedChunks = Arrays.copyOf(clipped, count);
         }
     }
 
     /**
-     * Index ranges, as pairs of first index and count, of the chunks with the given coverage, each up to its end quad (before its
-     * plants when they are left out); chunks that follow each other in the buffer are joined.
+     * Index ranges, as pairs of first index and count, of the chunks with the given coverage in every group; in the group with the
+     * plants each chunk ends at {@code plantEnds} (before its plants when they are left out). Parts that follow each other in the
+     * buffer are joined.
      */
-    private static int[] ranges(int[] chunkQuads, int[] ends, LodView.Coverage[] coverage, LodView.Coverage wanted) {
-        int[] ranges = new int[coverage.length * 2];
+    private static int[] ranges(int[] segments, int[] plantEnds, LodView.Coverage[] coverage, LodView.Coverage wanted) {
+        int chunks = coverage.length;
+        int[] ranges = new int[chunks * TileMesh.GROUPS * 2];
         int count = 0;
-        for (int chunk = 0; chunk < coverage.length; chunk++) {
-            if (coverage[chunk] != wanted || ends[chunk] <= chunkQuads[chunk]) {
-                continue;
-            }
-            int first = chunkQuads[chunk] * 6;
-            int length = (ends[chunk] - chunkQuads[chunk]) * 6;
-            if (count > 0 && ranges[count - 2] + ranges[count - 1] == first) {
-                ranges[count - 1] += length;
-            } else {
-                ranges[count++] = first;
-                ranges[count++] = length;
+        for (int group = 0; group < TileMesh.GROUPS; group++) {
+            for (int chunk = 0; chunk < chunks; chunk++) {
+                int start = segments[group * chunks + chunk];
+                int end = group == TileMesh.GROUP_OTHER ? plantEnds[chunk] : segments[group * chunks + chunk + 1];
+                if (coverage[chunk] != wanted || end <= start) {
+                    continue;
+                }
+                int first = start * 6;
+                int length = (end - start) * 6;
+                if (count > 0 && ranges[count - 2] + ranges[count - 1] == first) {
+                    ranges[count - 1] += length;
+                } else {
+                    ranges[count++] = first;
+                    ranges[count++] = length;
+                }
             }
         }
         return Arrays.copyOf(ranges, count);
@@ -497,8 +599,11 @@ public final class LodManager {
     private static final double PLANT_REACH_BEYOND_VANILLA = 64.0;
     private static final double PLANT_MIN_REACH = 128.0;
 
+    /** Queued meshes are dropped; running ones finish. Nothing is interrupted, see {@link WorkThrottle.Worker}. */
     public void close() {
         this.resetTiles();
-        this.meshExecutor.shutdownNow();
+        this.meshExecutor.getQueue().clear();
+        this.meshExecutor.shutdown();
+        this.cullExecutor.shutdown();
     }
 }

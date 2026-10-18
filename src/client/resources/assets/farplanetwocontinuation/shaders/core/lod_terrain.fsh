@@ -4,6 +4,14 @@
 #include <minecraft:fog.glsl>
 #include <minecraft:dynamictransforms.glsl>
 
+// Tiles with nothing cut away are drawn with NO_DISCARD: a shader that never drops a fragment lets the GPU reject hidden fragments
+// before shading them (on Adreno, its low resolution depth test only works for such draws).
+#ifdef NO_DISCARD
+#define DROP
+#else
+#define DROP discard
+#endif
+
 layout(location = 0) in float sphericalVertexDistance;
 layout(location = 1) in float cylindricalVertexDistance;
 layout(location = 2) in vec4 vertexColor;
@@ -44,7 +52,7 @@ vec4 blockTexture(float blur) {
     }
     if (color.a < 0.5 && (faceCode & 8) == 0) {
         if ((faceCode & 4) != 0) {
-            discard;
+            DROP;
         }
         color = vec4(textureLod(Sampler0, corner + spriteSize * 0.5, 4.0).rgb * 0.8, 1.0);
     }
@@ -118,20 +126,20 @@ void main() {
 void main() {
     // Rough tiles mark the void between floating islands with zero alpha; the island edge lies half way to the void sample.
     if (vertexColor.a < 0.5) {
-        discard;
+        DROP;
     }
     float horizontal = length(relativePosition.xz);
     if (horizontal < TextureMat[0][0] || (TextureMat[1][1] > 0.0 && horizontal > TextureMat[1][1])) {
-        discard;
+        DROP;
     }
     float fade = TextureMat[1][3] > 0.0 ? clamp((horizontal - TextureMat[1][1] + TextureMat[1][3]) / TextureMat[1][3], 0.0, 1.0) : 0.0;
 #ifdef FADE_PASS
     if (fade <= 0.0) {
-        discard;
+        DROP;
     }
 #elif !defined(WATER_PASS)
     if (fade > 0.0) {
-        discard;
+        DROP;
     }
 #endif
     if (TextureMat[0][3] > 0.5) {
@@ -139,7 +147,7 @@ void main() {
         int section = int(floor((worldY - 0.002) / 16.0)) - int(TextureMat[0][2]);
         int drawn = int(TextureMat[1][2] + 0.5);
         if (section >= 0 && section < 24 && ((drawn >> section) & 1) != 0) {
-            discard;
+            DROP;
         }
     }
     vec4 fogColor = TextureMat[3][3] > 0.5 ? FogColor : vec4(TextureMat[3].xyz, FogColor.a);
@@ -149,11 +157,11 @@ void main() {
     bool water = (faceCode & 8) != 0;
 #ifdef WATER_PASS
     if (!water) {
-        discard;
+        DROP;
     }
 #else
     if (water) {
-        discard;
+        DROP;
     }
 #endif
     vec4 texel = blockTexture(fade);

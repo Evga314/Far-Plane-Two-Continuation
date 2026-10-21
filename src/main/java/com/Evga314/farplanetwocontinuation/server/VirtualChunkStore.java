@@ -49,7 +49,7 @@ import org.slf4j.Logger;
 final class VirtualChunkStore {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAGIC = 0x46505643;
-    static final int FORMAT = 20;
+    static final int FORMAT = 21;
     private static final int REGION = VirtualTerrain.REGION;
     /**
      * About 2 MB per region in memory, one region per 256 MB of heap (16 with 4 GB): enough for the regions around a player with a

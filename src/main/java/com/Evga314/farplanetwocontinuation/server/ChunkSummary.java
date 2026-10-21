@@ -20,7 +20,6 @@ import net.minecraft.util.Mth;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.biome.Biome;
-import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -409,9 +408,10 @@ public final class ChunkSummary {
             if (!outline.isEmpty()) {
                 height = Mth.clamp((int) Math.ceil(outline.max(Direction.Axis.Y) * 16.0 - 1.0E-4), 1, 16);
             }
-            // Snow layers and powder snow have no collision either, but they are cover, not plants: a full cube (powder snow) or snow
-            // layers from three up pass the height test below and would be drawn as crossed quads instead of the box they are.
-            plant = state.getBlock() != Blocks.SNOW && !Block.isShapeFullBlock(outline)
+            // Snow layers and powder snow have no collision either, but they are cover, not plants: snow layers from three up
+            // pass the height test below and would be drawn as crossed quads instead of the box they are. Named blocks, not shapes:
+            // in 26.3 kelp plants and double plants have a full-block outline but are plants.
+            plant = state.getBlock() != Blocks.SNOW && state.getBlock() != Blocks.POWDER_SNOW
                 && state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty() && !outline.isEmpty() && height > PLANT_MIN_HEIGHT;
         } catch (RuntimeException e) {
             // Some modded blocks need a real world for their shape; they count as full blocks.

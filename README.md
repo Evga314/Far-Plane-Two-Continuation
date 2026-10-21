@@ -1,3 +1,5 @@
+SORRY. ALL before this commit? is fully vibe-sloped. I am tierd from AI, very tired. And I have not motivation to do this mod more using AI to to ABSOLUTE EVERETHUNG. My java knowledge is very bad now. And I was scared to do something big and hard just by my hands. But I am tired becaude AI can not understand us (people), that good for making reaaly the best ever LOD mod for minecraft. My hard solution to continue ,akimng this mod, but did not vibecoding. Yea, it can be slow, hard, but I will do it. You can see full source code at this page (all in that commit and in commits beforee is fully vibe-sloped and some parts are really trash, yea). i am open to PR's, issues, your feedback
+
 # FarPlaneTwoContinuation
 
 A Fabric mod for Minecraft **26.3** (Fabric Loader **0.19.5**, Fabric API) that draws simplified level-of-detail (LOD) terrain far

@@ -22,3 +22,5 @@ run
 
 # Local client game tests
 src/gametest/
+
+#not needed bin

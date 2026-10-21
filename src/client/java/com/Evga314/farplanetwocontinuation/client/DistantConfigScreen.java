@@ -5,6 +5,8 @@ import com.Evga314.farplanetwocontinuation.client.lod.TileMeshBuilder;
 import com.Evga314.farplanetwocontinuation.dimension.DimensionKind;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.OptionsSubScreen;
@@ -14,7 +16,7 @@ import net.minecraft.util.Mth;
 /** Settings of the rough distant terrain, for one kind of dimension. */
 public class DistantConfigScreen extends OptionsSubScreen {
     private static final String PREFIX = FarPlaneConstants.MOD_ID + ".options.";
-    private static final long TILE_BYTES = (long) TileMeshBuilder.VERTEX_COUNT * TileMeshBuilder.VERTEX_SIZE;
+    private static final long TILE_BYTES = (long) TileMeshBuilder.VERTEX_COUNT * TileMeshBuilder.ROUGH_VERTEX_SIZE;
 
     private final String initialSignature = FarplanetwocontinuationClient.manager().config().tileSignature();
     private final DimensionKind dimension;
@@ -83,6 +85,18 @@ public class DistantConfigScreen extends OptionsSubScreen {
         this.list.addSmall(start, sharpness);
         this.list.addSmall(memory, fog);
         this.list.addBig(noFog);
+        if (this.dimension == DimensionKind.OVERWORLD) {
+            this.list.addSmall(this.bordersButton("smoothing", config, false), this.bordersButton("blur", config, true));
+        }
+    }
+
+    /** A button opening the smoothing or the blur of borders, see {@link SmoothingConfigScreen}. */
+    private Button bordersButton(String name, ClientConfig.DistantSettings config, boolean blur) {
+        return Button.builder(Component.translatable(PREFIX + name), button -> {
+            if (this.minecraft != null) {
+                this.minecraft.gui.setScreen(new SmoothingConfigScreen(this, config.smoothing, blur));
+            }
+        }).tooltip(Tooltip.create(Component.translatable(PREFIX + name + ".tooltip"))).build();
     }
 
     /** The cell size of a start level, "4 blocks" for 2. */

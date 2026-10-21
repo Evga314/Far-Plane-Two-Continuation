@@ -194,6 +194,14 @@ public final class PerfLog {
         tickNsMax = Math.max(tickNsMax, nanos);
     }
 
+    /** Parts of the client tick, timed separately to see where it goes; see LodManager.tickLod. */
+    public static final String[] TICK_PHASES = {"view", "detail", "rough", "mask", "cull", "ranges", "rest", "(rough: plan", "walk", "tiles checked", "quiet ticks"};
+    private static final long[] tickPhaseNs = new long[TICK_PHASES.length];
+
+    public static void tickPhase(int phase, long nanos) {
+        tickPhaseNs[phase] += nanos;
+    }
+
     /**
      * Whether terrain occlusion culling is turned off to compare: with -Dfarplane.noOcclusion=true, or in the debug build while a file
      * {@code config/farplane-no-occlusion} exists, which can be created and removed while the game runs. The file is looked for once a
@@ -342,6 +350,14 @@ public final class PerfLog {
             uploadsSum, uploadBytesSum / 1048576.0, uploadNsMax / 1e6, ticks == 0 ? 0.0 : tickNsSum / 1e6 / ticks, tickNsMax / 1e6));
         line.append(String.format(Locale.ROOT, " (occlusion %s avg %.2f max %.1f ms)", occlusionOff ? "OFF" : "on",
             ticks == 0 ? 0.0 : horizonNsSum / 1e6 / ticks, horizonNsMax / 1e6));
+        line.append(" tick parts avg");
+        for (int phase = 0; phase < TICK_PHASES.length; phase++) {
+            // The last two are counts, not times: tiles checked per tick, and the share of ticks without a walk.
+            double value = ticks == 0 ? 0.0 : tickPhaseNs[phase] / (phase >= TICK_PHASES.length - 2 ? 1.0 : 1e6) / ticks;
+            line.append(String.format(Locale.ROOT, " %s %.2f", TICK_PHASES[phase], value));
+            tickPhaseNs[phase] = 0L;
+        }
+        line.append(")");
         long built = meshes.getAndSet(0L);
         line.append(String.format(Locale.ROOT, " | meshes built %d, avg %.1f max %.1f ms",
             built, built == 0 ? 0.0 : meshNs.getAndSet(0L) / 1e6 / built, meshNsMax.getAndSet(0L) / 1e6));

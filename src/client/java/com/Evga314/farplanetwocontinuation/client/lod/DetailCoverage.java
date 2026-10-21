@@ -33,6 +33,11 @@ final class DetailCoverage {
 
         boolean[] covered = new boolean[this.size * this.size];
         for (TileMesh mesh : detailTiles) {
+            // A tile the terrain culling hides is not drawn, so it must not replace the rough terrain: the culling runs after
+            // this is built, so the verdict of the last finished round is what counts here.
+            if (mesh.occluded) {
+                continue;
+            }
             int cells = mesh.pos.size() / CELL;
             long startX = Math.floorDiv(mesh.pos.minX(), CELL) - this.originX;
             long startZ = Math.floorDiv(mesh.pos.minZ(), CELL) - this.originZ;

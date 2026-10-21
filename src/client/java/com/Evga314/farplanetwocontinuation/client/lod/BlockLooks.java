@@ -75,6 +75,21 @@ final class BlockLooks {
         int tintColor(BlockState state, @Nullable Holder<Biome> biome, int x, int y, int z) {
             return this.tint == null ? 0xFFFFFFFF : ARGB.opaque(tintAt(this.tint, state, biome, x, y, z));
         }
+
+        /** The average color of the face at a place, with the tint blended between the biomes around it, see {@link Blend}. */
+        int colorBlended(BlockState state, Blend blend, int y) {
+            int color = this.tint == null ? this.average : ARGB.multiply(this.average, tintAtBlended(this.tint, state, blend, y));
+            if (this.overlayCoverage <= 0.0F) {
+                return color;
+            }
+            int overlay = this.overlayTint == null ? this.overlayAverage : ARGB.multiply(this.overlayAverage, tintAtBlended(this.overlayTint, state, blend, y));
+            return ARGB.srgbLerp(this.overlayCoverage, color, overlay);
+        }
+
+        /** Only the tint, blended between the biomes around the place, for textured faces. */
+        int tintColorBlended(BlockState state, Blend blend, int y) {
+            return this.tint == null ? 0xFFFFFFFF : ARGB.opaque(tintAtBlended(this.tint, state, blend, y));
+        }
     }
 
     /**
@@ -124,6 +139,10 @@ final class BlockLooks {
 
     private static Look compute(Identifier id) {
         BlockState state = BuiltInRegistries.BLOCK.getOptional(id).orElse(Blocks.STONE).defaultBlockState();
+        // Blocks that show nothing but their liquid (a bubble column) look like that liquid; older summaries still have them.
+        if (state.getRenderShape() == net.minecraft.world.level.block.RenderShape.INVISIBLE && !state.getFluidState().isEmpty()) {
+            state = state.getFluidState().createLegacyBlock();
+        }
         int mapColor = ARGB.opaque(state.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).col);
         Face fallback = Face.of(null, mapColor, null, false);
         boolean fluid = !state.getFluidState().isEmpty() && state.getBlock() == state.getFluidState().createLegacyBlock().getBlock();
@@ -285,6 +304,41 @@ final class BlockLooks {
         }
         cache.put(key, color);
         return color;
+    }
+
+    /**
+     * The tint of a block at a place, blended between the four squares of biome around it (see {@link Blend}). The tints themselves
+     * are blended, as they are multipliers; the color of the face is multiplied with the result once, afterwards.
+     */
+    private static int tintAtBlended(BlockTintSource tint, BlockState state, Blend blend, int y) {
+        float red = 0.0F;
+        float green = 0.0F;
+        float blue = 0.0F;
+        for (int i = 0; i < 4; i++) {
+            float weight = blend.weights[i];
+            if (weight <= 0.0F) {
+                continue;
+            }
+            int sample = tintAt(tint, state, blend.biomes[i], blend.xs[i], y, blend.zs[i]);
+            red += weight * ARGB.red(sample);
+            green += weight * ARGB.green(sample);
+            blue += weight * ARGB.blue(sample);
+        }
+        return ARGB.color(255, Math.round(red), Math.round(green), Math.round(blue));
+    }
+
+    /**
+     * Where colors are blended from at a place. Vanilla keeps biomes in squares of 4 blocks, and every color changes in a step at
+     * their borders unless it is blended. Like vanilla's biome blend, each place takes the colors at the middles of the four squares
+     * around it, weighted by how close it is to each, so a border becomes a smooth change over one square instead of a staircase.
+     * Filled by the mesh builder per cell and reused.
+     */
+    static final class Blend {
+        @SuppressWarnings("unchecked")
+        final Holder<Biome>[] biomes = new Holder[4];
+        final int[] xs = new int[4];
+        final int[] zs = new int[4];
+        final float[] weights = new float[4];
     }
 
     /** Squares of 2^TINT_CELL blocks share a tint. */

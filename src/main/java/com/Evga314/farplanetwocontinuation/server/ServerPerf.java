@@ -19,6 +19,19 @@ final class ServerPerf {
     static final Kind SAVED_CHUNKS = new Kind("saved chunks read");
     static final Kind VIRTUAL_REGIONS = new Kind("virtual areas made");
     static final AtomicLong VIRTUAL_CHUNKS = new AtomicLong();
+    /** Processor time of the parts of making rough tiles, without the pauses for the game's frames, see {@link #cpu}. */
+    static final Kind ROUGH_NEAR = new Kind("cpu near");
+    static final Kind ROUGH_ESTIMATED = new Kind("cpu coarse estimated");
+    static final Kind ROUGH_EXACT = new Kind("cpu coarse exact");
+    static final Kind ICEBERGS = new Kind("cpu icebergs");
+    /** Exact searches for the surface, the costly part of rough tiles. */
+    static final AtomicLong SURFACE_SEARCHES = new AtomicLong();
+    private static final java.lang.management.ThreadMXBean THREADS = java.lang.management.ManagementFactory.getThreadMXBean();
+
+    /** Processor time of this thread so far, 0 outside the debug build. */
+    static long cpu() {
+        return ON ? THREADS.getCurrentThreadCpuTime() : 0L;
+    }
 
     private ServerPerf() {
     }
@@ -26,9 +39,10 @@ final class ServerPerf {
     static void summary(double serverTickMs, int roughQueued, int detailQueued) {
         StringBuilder line = new StringBuilder(256);
         boolean any = false;
-        for (Kind kind : new Kind[] {ROUGH, DETAIL, SAVED_CHUNKS, VIRTUAL_REGIONS}) {
+        for (Kind kind : new Kind[] {ROUGH, ROUGH_NEAR, ROUGH_ESTIMATED, ROUGH_EXACT, ICEBERGS, DETAIL, SAVED_CHUNKS, VIRTUAL_REGIONS}) {
             any |= kind.append(line);
         }
+        line.append(" | surface searches ").append(SURFACE_SEARCHES.getAndSet(0L));
         long chunks = VIRTUAL_CHUNKS.getAndSet(0L);
         if (!any && roughQueued == 0 && detailQueued == 0) {
             return;

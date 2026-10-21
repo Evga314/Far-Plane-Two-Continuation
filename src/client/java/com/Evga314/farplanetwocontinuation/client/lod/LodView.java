@@ -2,6 +2,9 @@ package com.Evga314.farplanetwocontinuation.client.lod;
 
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+import java.util.Arrays;
+import net.minecraft.util.Util;
 import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -34,8 +37,41 @@ final class LodView {
     private final Minecraft minecraft;
     /** Position of the section looked up; only used on the client thread. */
     private final BlockPos.MutableBlockPos scratch = new BlockPos.MutableBlockPos();
-    /** Per-tick cache of whether vanilla already draws a chunk: 1 yes, -1 no. */
-    private final Long2ByteOpenHashMap chunkStates = new Long2ByteOpenHashMap();
+    /**
+     * What vanilla draws of each chunk up to {@link #gridHalf} chunks from the one at {@link #gridX}, {@link #gridZ}, row by row from
+     * the north-west corner, worked out once per tick when first asked: see {@link #RENDERED} and {@link #COLUMN}. Kept from tick to
+     * tick and only cleared, so asking costs no allocation.
+     */
+    private byte[] chunkGrid = new byte[0];
+    private int gridHalf = -1;
+    private int gridX;
+    private int gridZ;
+    /** Flags of {@link #chunkGrid}: whether each answer is known this tick, and what it is. */
+    private static final byte RENDERED_KNOWN = 1;
+    private static final byte RENDERED = 2;
+    private static final byte COLUMN_KNOWN = 4;
+    private static final byte COLUMN = 8;
+    /**
+     * Sodium's answers this tick of whether it has built a section, 1 yes, -1 no: the detailed tiles, the mask and the coverage ask
+     * about the same sections, each through a method handle.
+     */
+    private final Long2ByteOpenHashMap sodiumReady = new Long2ByteOpenHashMap();
+    /** Sodium's renderer this tick, or null without Sodium; then {@link #viewArea} is vanilla's. Asked for once per tick. */
+    private @Nullable Object sodium;
+    private @Nullable ViewArea viewArea;
+    /** When each chunk the client has was first found loaded, see {@link #settled}. */
+    private final Long2LongOpenHashMap loadedSince = new Long2LongOpenHashMap();
+    /**
+     * How long a chunk has to be loaded before it counts as drawn by vanilla even with sections not built: vanilla and Sodium build
+     * the sections they see within moments, and those they never build are hidden behind the others, so the LOD there only shows
+     * through or pokes out of the blocks.
+     */
+    private static final long SETTLE_MILLIS = 2000L;
+    /** The chunks remembered by {@link #settled} are let go past this many, those more than this many chunks beyond vanilla's reach. */
+    private static final int LOADED_SINCE_LIMIT = 65536;
+    private static final int FORGET_BEYOND_CHUNKS = 8;
+    /** The sections the surface of a chunk lies in, see vanillaDrawsChunk; kept instead of made for every chunk. */
+    private final int[] surfaceSections = new int[SURFACE_PROBES.length / 2 * 3];
     /** Sections vanilla has on screen, gathered once per tick when first needed. */
     private @Nullable ReferenceOpenHashSet<SectionRenderDispatcher.RenderSection> visibleSections;
     double camX;
@@ -46,6 +82,8 @@ final class LodView {
     double lookZ;
     double vanillaRadius;
     double vanillaDepthFar;
+    /** The cloud far plane setting of the dimension the player is in, pushed by the manager every tick. */
+    boolean extendCloudFarPlane;
     /**
      * How many pixels a block at a distance takes on this screen, against a 1080 pixels high window with a field of view of 70: tiles
      * get finer on bigger screens and with a narrower view. They never get coarser than on that screen.
@@ -61,6 +99,16 @@ final class LodView {
         this.minecraft = minecraft;
     }
 
+    /**
+     * How far the far plane must reach for the whole cloud disc to stay inside it from a camera height: the slant distance to the
+     * edge of the disc. The cloud layer of a vanilla dimension is never more than 192 blocks from y 0, which bounds the height
+     * difference; the same formula extends the real far plane in CameraMixin.
+     */
+    static double cloudReach(double cloudRange, double camY) {
+        double dy = Math.abs(camY) + 192.0;
+        return Math.sqrt(cloudRange * cloudRange + dy * dy) * 1.02 + 32.0;
+    }
+
     void update(ClientLevel level) {
         Vec3 camera = this.minecraft.gameRenderer.mainCamera().position();
         this.camX = camera.x;
@@ -72,14 +120,40 @@ final class LodView {
         this.lookZ = horizontal > 0.05 ? forward.z() / horizontal : 0.0;
         int renderDistance = this.minecraft.options.getEffectiveRenderDistance();
         this.vanillaRadius = Math.max(0, renderDistance - 1) * 16.0;
-        this.vanillaDepthFar = 0.9 * Math.max(renderDistance * 16.0 * 4.0, this.minecraft.options.cloudRange().get() * 16.0);
+        double cloudRange = this.minecraft.options.cloudRange().get() * 16.0;
+        double vanillaFar = Math.max(renderDistance * 16.0 * 4.0, cloudRange);
+        if (this.extendCloudFarPlane) {
+            // Vanilla's far plane is extended the same way (CameraMixin), so what counts as covered by vanilla grows with it.
+            vanillaFar = Math.max(vanillaFar, cloudReach(cloudRange, this.camY));
+        }
+        this.vanillaDepthFar = 0.9 * vanillaFar;
         int height = Mth.clamp(this.minecraft.getWindow().getHeight(), 480, 1600);
         double fov = Math.toRadians(Mth.clamp(this.minecraft.options.fov().get(), 30, 110));
         this.screenScale = Math.max(1.0, height * 0.5 / Math.tan(fov * 0.5) / REFERENCE_FOCAL);
         this.worldMinY = level.getMinY();
         this.worldMaxY = level.getMaxY() + 1;
-        this.chunkStates.clear();
+        this.sodium = SodiumCompat.isActive() ? SodiumCompat.renderer() : null;
+        this.viewArea = this.sodium == null ? this.minecraft.levelRenderer.viewArea() : null;
+        this.sodiumReady.clear();
+        int half = renderDistance + 1;
+        int side = 2 * half + 1;
+        if (this.chunkGrid.length != side * side) {
+            this.chunkGrid = new byte[side * side];
+        } else {
+            Arrays.fill(this.chunkGrid, (byte) 0);
+        }
+        this.gridHalf = half;
+        this.gridX = SectionPos.blockToSectionCoord(Mth.floor(this.camX));
+        this.gridZ = SectionPos.blockToSectionCoord(Mth.floor(this.camZ));
         this.visibleSections = null;
+        // Only chunks far behind are forgotten: clearing all would make every chunk around unsettled again at once, and the distant
+        // terrain would show up under all of them for a moment.
+        if (this.loadedSince.size() > LOADED_SINCE_LIMIT) {
+            int cameraChunkX = SectionPos.blockToSectionCoord(Mth.floor(this.camX));
+            int cameraChunkZ = SectionPos.blockToSectionCoord(Mth.floor(this.camZ));
+            int keep = renderDistance + FORGET_BEYOND_CHUNKS;
+            this.loadedSince.keySet().removeIf(key -> Math.abs(ChunkPos.getX(key) - cameraChunkX) > keep || Math.abs(ChunkPos.getZ(key) - cameraChunkZ) > keep);
+        }
     }
 
     /** Vertical distance to the whole build height, used when nothing better is known about a tile. */
@@ -121,14 +195,37 @@ final class LodView {
      * under the player too: when flying fast those chunks are just as likely to be missing.
      */
     boolean chunkRendered(int chunkX, int chunkZ) {
-        long key = ChunkPos.pack(chunkX, chunkZ);
-        byte cached = this.chunkStates.get(key);
-        if (cached != 0) {
-            return cached > 0;
+        int index = this.gridIndex(chunkX, chunkZ);
+        if (index < 0) {
+            return this.vanillaDrawsChunk(chunkX, chunkZ);
         }
-        boolean rendered = this.vanillaDrawsChunk(chunkX, chunkZ);
-        this.chunkStates.put(key, rendered ? (byte) 1 : (byte) -1);
-        return rendered;
+        byte state = this.chunkGrid[index];
+        if ((state & RENDERED_KNOWN) == 0) {
+            state |= this.vanillaDrawsChunk(chunkX, chunkZ) ? RENDERED_KNOWN | RENDERED : RENDERED_KNOWN;
+            this.chunkGrid[index] = state;
+        }
+        return (state & RENDERED) != 0;
+    }
+
+    /** Index of a chunk in {@link #chunkGrid}, -1 outside it. */
+    private int gridIndex(int chunkX, int chunkZ) {
+        int half = this.gridHalf;
+        int side = 2 * half + 1;
+        int x = chunkX - this.gridX + half;
+        int z = chunkZ - this.gridZ + half;
+        return half < 0 || x < 0 || z < 0 || x >= side || z >= side ? -1 : x + z * side;
+    }
+
+    /** Whether Sodium has built a section, asked once per section and tick, see {@link #sodiumReady}. */
+    private boolean sodiumReady(Object sodium, int chunkX, int sectionY, int chunkZ) {
+        long key = SectionPos.asLong(chunkX, sectionY, chunkZ);
+        byte known = this.sodiumReady.get(key);
+        if (known != 0) {
+            return known > 0;
+        }
+        boolean ready = SodiumCompat.isSectionReady(sodium, chunkX, sectionY, chunkZ);
+        this.sodiumReady.put(key, ready ? (byte) 1 : (byte) -1);
+        return ready;
     }
 
     /**
@@ -139,8 +236,8 @@ final class LodView {
      */
     private boolean vanillaDrawsChunk(int chunkX, int chunkZ) {
         ClientLevel level = this.minecraft.level;
-        Object sodium = SodiumCompat.isActive() ? SodiumCompat.renderer() : null;
-        ViewArea viewArea = sodium == null ? this.minecraft.levelRenderer.viewArea() : null;
+        Object sodium = this.sodium;
+        ViewArea viewArea = this.viewArea;
         if (level == null || sodium == null && viewArea == null) {
             return false;
         }
@@ -152,25 +249,74 @@ final class LodView {
         }
         ChunkAccess chunk = level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
         if (!(chunk instanceof LevelChunk) || chunk instanceof EmptyLevelChunk) {
+            this.loadedSince.remove(ChunkPos.pack(chunkX, chunkZ));
             return false;
         }
-        // The surface of a chunk can span several sections (water in a valley, trees on a hill). Vanilla has to draw the lowest and
-        // the highest of them, otherwise hiding the LOD there would leave holes.
+        boolean settled = this.settled(chunkX, chunkZ);
+        // The surface of a chunk can span several sections (water in a valley, trees on a hill). Vanilla has to draw the sections the
+        // surface is in, otherwise hiding the LOD there would leave holes; the ones between them are under the ground.
         int low = Integer.MAX_VALUE;
         int high = Integer.MIN_VALUE;
+        int[] surface = this.surfaceSections;
+        int count = 0;
+        int cameraSection = SectionPos.blockToSectionCoord(Mth.floor(this.camY));
         for (int i = 0; i < SURFACE_PROBES.length; i += 2) {
             int x = SURFACE_PROBES[i];
             int z = SURFACE_PROBES[i + 1];
             int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
-            // The ground under tree crowns is part of what is seen too.
+            // The ground under tree crowns and the bottom under water are part of what is seen too.
             int ground = chunk.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-            low = Math.min(low, Math.min(height, ground));
+            int floor = chunk.getHeight(Heightmap.Types.OCEAN_FLOOR, x, z);
+            low = Math.min(low, Math.min(Math.min(height, ground), floor));
             high = Math.max(high, height);
+            count = addSection(surface, count, height);
+            count = addSection(surface, count, ground);
+            count = addSection(surface, count, floor);
         }
         if (high <= this.worldMinY) {
             return true;
         }
-        return this.sectionsDrawn(sodium, viewArea, chunkX, chunkZ, Math.max(low, this.worldMinY + 1) - 1, high - 1);
+        int lowY = Math.max(low, this.worldMinY + 1) - 1;
+        int highSection = SectionPos.blockToSectionCoord(Mth.clamp(high - 1, this.worldMinY, this.worldMaxY - 1));
+        boolean drawn = true;
+        for (int i = 0; i < count && drawn; i++) {
+            drawn = sodium != null
+                ? this.sodiumSectionDrawn(sodium, chunkX, chunkZ, surface[i])
+                : this.sectionDrawn(viewArea, cameraSection, chunkX, chunkZ, surface[i], surface[i] == highSection);
+        }
+        return drawn || settled && this.inReach(sodium, viewArea, chunkX, chunkZ, lowY) && this.inReach(sodium, viewArea, chunkX, chunkZ, high - 1);
+    }
+
+    /** Adds the section holding the block under a surface height to the list once. */
+    private int addSection(int[] sections, int count, int height) {
+        int section = SectionPos.blockToSectionCoord(Mth.clamp(Math.max(height, this.worldMinY + 1) - 1, this.worldMinY, this.worldMaxY - 1));
+        for (int i = 0; i < count; i++) {
+            if (sections[i] == section) {
+                return count;
+            }
+        }
+        sections[count] = section;
+        return count + 1;
+    }
+
+    /** Whether a chunk the client has has been loaded for a while, see {@link #SETTLE_MILLIS}. */
+    private boolean settled(int chunkX, int chunkZ) {
+        long key = ChunkPos.pack(chunkX, chunkZ);
+        long now = Util.getMillis();
+        if (!this.loadedSince.containsKey(key)) {
+            this.loadedSince.put(key, now);
+            return false;
+        }
+        return now - this.loadedSince.get(key) >= SETTLE_MILLIS;
+    }
+
+    /** Whether the section at a height of a chunk is within the reach vanilla (or Sodium) draws sections in. */
+    private boolean inReach(@Nullable Object sodium, @Nullable ViewArea viewArea, int chunkX, int chunkZ, int y) {
+        int sectionY = SectionPos.blockToSectionCoord(Mth.clamp(y, this.worldMinY, this.worldMaxY - 1));
+        if (sodium != null) {
+            return this.sodiumInReach(chunkX, chunkZ, sectionY);
+        }
+        return viewArea != null && Math.abs(sectionY - SectionPos.blockToSectionCoord(Mth.floor(this.camY))) <= viewArea.getViewDistance();
     }
 
     /** How much of what a detailed tile has in a chunk vanilla draws itself. */
@@ -200,8 +346,8 @@ final class LodView {
             return Coverage.FULL;
         }
         ClientLevel level = this.minecraft.level;
-        Object sodium = SodiumCompat.isActive() ? SodiumCompat.renderer() : null;
-        ViewArea viewArea = sodium == null ? this.minecraft.levelRenderer.viewArea() : null;
+        Object sodium = this.sodium;
+        ViewArea viewArea = this.viewArea;
         if (level == null || sodium == null && viewArea == null) {
             return Coverage.NONE;
         }
@@ -213,6 +359,12 @@ final class LodView {
         ChunkAccess chunk = level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
         if (!(chunk instanceof LevelChunk) || chunk instanceof EmptyLevelChunk) {
             return Coverage.NONE;
+        }
+        // Without Sodium the loop below reads vanilla's real built sections, and a settled chunk only skips it. Sodium does not build
+        // sections it cannot see, the seabed under water seen from high up for example: a settled chunk would drop them from the tile
+        // with nothing drawn there, so with Sodium every section is asked.
+        if (sodium == null && this.settled(chunkX, chunkZ) && this.inReach(null, viewArea, chunkX, chunkZ, lowY) && this.inReach(null, viewArea, chunkX, chunkZ, highY)) {
+            return Coverage.FULL;
         }
         int cameraSection = SectionPos.blockToSectionCoord(Mth.floor(this.camY));
         int lowSection = SectionPos.blockToSectionCoord(Mth.clamp(lowY, this.worldMinY, this.worldMaxY - 1));
@@ -252,27 +404,12 @@ final class LodView {
      * no farther above or below than that. Sodium culls sections past it, built or not.
      */
     private boolean sodiumInReach(int chunkX, int chunkZ, int sectionY) {
+        // Sodium measures from the camera to the nearest point of the section.
         double limit = this.minecraft.options.getEffectiveRenderDistance() * 16.0;
-        double dx = chunkX * 16.0 + 8.0 - this.camX;
-        double dz = chunkZ * 16.0 + 8.0 - this.camZ;
-        double dy = sectionY * 16.0 + 8.0 - this.camY;
-        return dx * dx + dz * dz <= (limit - 8.0) * (limit - 8.0) && Math.abs(dy) <= limit;
-    }
-
-    /** Every section from the lowest to the highest block has to be drawn by vanilla, or hiding the LOD leaves a hole. */
-    private boolean sectionsDrawn(@Nullable Object sodium, @Nullable ViewArea viewArea, int chunkX, int chunkZ, int lowY, int highY) {
-        int cameraSection = SectionPos.blockToSectionCoord(Mth.floor(this.camY));
-        int lowSection = SectionPos.blockToSectionCoord(Mth.clamp(lowY, this.worldMinY, this.worldMaxY - 1));
-        int highSection = SectionPos.blockToSectionCoord(Mth.clamp(highY, this.worldMinY, this.worldMaxY - 1));
-        for (int sectionY = lowSection; sectionY <= highSection; sectionY++) {
-            boolean drawn = sodium != null
-                ? this.sodiumSectionDrawn(sodium, chunkX, chunkZ, sectionY)
-                : this.sectionDrawn(viewArea, cameraSection, chunkX, chunkZ, sectionY, sectionY == highSection);
-            if (!drawn) {
-                return false;
-            }
-        }
-        return true;
+        double dx = Math.max(0.0, Math.max(chunkX * 16.0 - this.camX, this.camX - (chunkX * 16.0 + 16.0)));
+        double dz = Math.max(0.0, Math.max(chunkZ * 16.0 - this.camZ, this.camZ - (chunkZ * 16.0 + 16.0)));
+        double dy = Math.max(0.0, Math.max(sectionY * 16.0 - this.camY, this.camY - (sectionY * 16.0 + 16.0)));
+        return dx * dx + dz * dz < limit * limit && dy < limit;
     }
 
     /**
@@ -280,7 +417,7 @@ final class LodView {
      * sections it has on screen, so a built section counts as drawn.
      */
     private boolean sodiumSectionDrawn(Object sodium, int chunkX, int chunkZ, int sectionY) {
-        return this.sodiumInReach(chunkX, chunkZ, sectionY) && SodiumCompat.isSectionReady(sodium, chunkX, sectionY, chunkZ);
+        return this.sodiumInReach(chunkX, chunkZ, sectionY) && this.sodiumReady(sodium, chunkX, sectionY, chunkZ);
     }
 
     /**
@@ -319,24 +456,102 @@ final class LodView {
     }
 
     /**
-     * Radius around the camera in which vanilla draws every chunk, found ring by ring from the camera outwards. Rough terrain only
-     * guesses the surface and would show through vanilla water, leaves and glass there, so it is left out inside it.
+     * Which chunks up to {@code half} chunks from the camera's vanilla draws, 1 each, row by row from the north-west corner. The rough
+     * terrain is left out there: under vanilla's translucent water its opaque water and the skirts of its tiles would show.
+     */
+    byte[] chunkMask(int half, byte[] reuse) {
+        int side = 2 * half + 1;
+        int centerX = SectionPos.blockToSectionCoord(Mth.floor(this.camX));
+        int centerZ = SectionPos.blockToSectionCoord(Mth.floor(this.camZ));
+        byte[] mask = reuse.length == side * side ? reuse : new byte[side * side];
+        for (int z = 0; z < side; z++) {
+            for (int x = 0; x < side; x++) {
+                mask[x + z * side] = this.columnDrawn(centerX + x - half, centerZ + z - half) ? (byte) 1 : (byte) 0;
+            }
+        }
+        return mask;
+    }
+
+    /** {@link #drawsColumn}, worked out once per chunk and tick. */
+    private boolean columnDrawn(int chunkX, int chunkZ) {
+        int index = this.gridIndex(chunkX, chunkZ);
+        if (index < 0) {
+            return this.drawsColumn(chunkX, chunkZ);
+        }
+        byte state = this.chunkGrid[index];
+        if ((state & COLUMN_KNOWN) == 0) {
+            state |= this.drawsColumn(chunkX, chunkZ) ? COLUMN_KNOWN | COLUMN : COLUMN_KNOWN;
+            this.chunkGrid[index] = state;
+        }
+        return (state & COLUMN) != 0;
+    }
+
+    /**
+     * Whether vanilla draws a chunk within its reach in height, for {@link #chunkMask}: the rough terrain is left out there only up to
+     * that reach above and below the camera (see the shader), so sections out of it do not count. The chunk must be in the render
+     * distance and loaded, and either the sections of its surface within reach are built or it has been loaded for a while.
+     */
+    private boolean drawsColumn(int chunkX, int chunkZ) {
+        ClientLevel level = this.minecraft.level;
+        Object sodium = this.sodium;
+        ViewArea viewArea = this.viewArea;
+        if (level == null || sodium == null && viewArea == null) {
+            return false;
+        }
+        int cameraSection = SectionPos.blockToSectionCoord(Mth.floor(this.camY));
+        if (viewArea != null) {
+            int cameraChunkX = SectionPos.blockToSectionCoord(Mth.floor(this.camX));
+            int cameraChunkZ = SectionPos.blockToSectionCoord(Mth.floor(this.camZ));
+            if (!ChunkTrackingView.isInViewDistance(cameraChunkX, cameraChunkZ, viewArea.getViewDistance(), chunkX, chunkZ)) {
+                return false;
+            }
+        } else if (!this.sodiumInReach(chunkX, chunkZ, cameraSection)) {
+            return false;
+        }
+        ChunkAccess chunk = level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        if (!(chunk instanceof LevelChunk) || chunk instanceof EmptyLevelChunk) {
+            this.loadedSince.remove(ChunkPos.pack(chunkX, chunkZ));
+            return false;
+        }
+        if (this.settled(chunkX, chunkZ)) {
+            return true;
+        }
+        for (int i = 0; i < SURFACE_PROBES.length; i += 2) {
+            int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, SURFACE_PROBES[i], SURFACE_PROBES[i + 1]);
+            int sectionY = SectionPos.blockToSectionCoord(Mth.clamp(Math.max(height, this.worldMinY + 1) - 1, this.worldMinY, this.worldMaxY - 1));
+            boolean inReach = sodium != null
+                ? this.sodiumInReach(chunkX, chunkZ, sectionY)
+                : Math.abs(sectionY - cameraSection) <= viewArea.getViewDistance();
+            if (inReach && !(sodium != null
+                ? this.sodiumReady(sodium, chunkX, sectionY, chunkZ)
+                : this.sectionDrawn(viewArea, cameraSection, chunkX, chunkZ, sectionY, true))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Radius around the camera in which vanilla draws every chunk: up to the nearest chunk it does not draw, within its render
+     * distance. Rough terrain only guesses the surface and would show through vanilla water, leaves and glass there, or poke out of
+     * the blocks, so it is left out inside it.
      */
     double fullyDrawnRadius(int renderDistance) {
         int centerX = SectionPos.blockToSectionCoord(Mth.floor(this.camX));
         int centerZ = SectionPos.blockToSectionCoord(Mth.floor(this.camZ));
-        int ring = 0;
-        outer:
-        for (; ring <= renderDistance; ring++) {
-            for (int dz = -ring; dz <= ring; dz++) {
-                for (int dx = -ring; dx <= ring; dx++) {
-                    if ((Math.abs(dx) == ring || Math.abs(dz) == ring) && !this.chunkRendered(centerX + dx, centerZ + dz)) {
-                        break outer;
-                    }
+        double radius = Math.max(0, renderDistance - 1) * 16.0;
+        for (int dz = -renderDistance; dz <= renderDistance; dz++) {
+            for (int dx = -renderDistance; dx <= renderDistance; dx++) {
+                int chunkX = centerX + dx;
+                int chunkZ = centerZ + dz;
+                double nearX = Math.max(0.0, Math.max(chunkX * 16.0 - this.camX, this.camX - (chunkX * 16.0 + 16.0)));
+                double nearZ = Math.max(0.0, Math.max(chunkZ * 16.0 - this.camZ, this.camZ - (chunkZ * 16.0 + 16.0)));
+                double near = Math.sqrt(nearX * nearX + nearZ * nearZ);
+                if (near < radius && !this.chunkRendered(chunkX, chunkZ)) {
+                    radius = near;
                 }
             }
         }
-        // Every chunk closer than the first ring with a missing one is drawn; the camera can be anywhere in its own chunk.
-        return Math.max(0, ring - 1) * 16.0;
+        return radius;
     }
 }

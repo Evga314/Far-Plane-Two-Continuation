@@ -44,12 +44,17 @@ The main page has:
 - **Start Cell Size**: size of the cells right after the detailed terrain (or after vanilla chunks when it is off): 1, 2, 4, 8 or
   16 blocks, default 4. Farther away the cells grow on their own. Smaller cells make a smoother transition; 1 and 2 put a heavy
   load on the CPU.
-- **Sharpness**: Economy, Normal or Sharp. How sharp the terrain looks far away; adapts to the screen resolution and FOV.
+- **Sharpness**: Economy, Normal, Sharp or Maximum. How sharp the terrain looks far away; adapts to the screen resolution and FOV.
+  Maximum is as sharp as the screen can show, for looking at the world from high above; it needs a lot of video memory and
+  loads much longer.
 - **GPU Memory**: video memory for distant terrain, up to 8 GB. More memory also makes the terrain sharper. Lower it on weak
   devices.
 - **Fog Start**: part of the LOD distance after which terrain fades into fog.
 - **No Fog**: removes all fog (render distance, weather, water, lava). Blindness and darkness still work. Off by default so it does
   not conflict with other fog mods.
+- **Smoothing** and **Blur** (overworld, each on its own screen): separately for coasts, snow, forest edges, biomes and water of
+  different temperatures. Smoothing (1 to 8) rounds the borders off and removes small patches, more for higher values. Blur (none
+  to 5) is how wide one color turns into the other at the border, each step twice as wide.
 
 **Detailed Terrain** (per dimension): shows real blocks (trees, buildings) around the normal render distance
 instead of simplified terrain, from chunks that already exist in the world. It also stands in for vanilla chunks that are not
@@ -82,12 +87,14 @@ Key bindings (can be changed in Controls; on MojoLauncher they can be put on a c
 Commands. `/FPhelp` lists them all in chat and works for every player; the `/farplane` commands are for operators, or the player
 in singleplayer with cheats allowed:
 
-- `/farplane pregen <radius>` - generate the detailed terrain within `<radius>` chunks (1 to 256) around you ahead of time, like
-  Chunky does for chunks, but only the light copies used for distant terrain; the world itself is not changed. Chunks that already
-  exist or were made before are skipped, and the work pauses while the server is busy.
-- `/farplane pregen <radius> <x> <z>` - the same around the block column `<x> <z>`, for example `/farplane pregen 128 0 0`.
-- `/farplane pregen status` - progress and time left.
-- `/farplane pregen stop` - stop; what is done stays saved.
+- `/farplane pregen detail start <radius>` - generate the detailed terrain within `<radius>` chunks (1 to 256) around you ahead of time,
+  like Chunky does for chunks, but only the light copies used for distant terrain; the world itself is not changed. Chunks that
+  already exist or were made before are skipped, and the work pauses while the server is busy.
+- `/farplane pregen distant start <radius>` - generate the distant terrain within `<radius>` blocks around you ahead of time into the
+  tile cache, with all free CPU; detailed terrain goes on slowly in the background meanwhile.
+- `... start <radius> <x> <z>` - the same around the block column `<x> <z>`, for example `/farplane pregen detail start 128 0 0`.
+- `/farplane pregen detail status`, `/farplane pregen distant status` - progress and time left.
+- `/farplane pregen detail stop`, `/farplane pregen distant stop` - stop; what is done stays saved.
 
 Config files: `config/farplanetwocontinuation-client.json` and `config/farplanetwocontinuation-server.json`. The server file lets the
 admin limit the distance and detail, the detailed terrain radius, whether saved chunks are read for it, whether unexplored places
@@ -101,18 +108,26 @@ are generated for it, the number of generator threads, the request queue per pla
 3. The server builds a tile straight from the world generator's noise. Chunks are **not generated or loaded**, which is what makes
    terrain millions of blocks away possible. LOD terrain has no structures or player builds: only terrain, water and biome
    colors. The surface block is guessed from the biome, the height and the slope (grass, sand, snow, stone, gravel, podzol,
-   mycelium, terracotta bands in badlands, ice on frozen water) and painted like vanilla's: the average color of its texture with
+   mycelium, terracotta bands in badlands, ice on frozen water, vanilla's icebergs on frozen oceans, where they really stand) and painted like vanilla's: the average color of its texture with
    the biome tint, slopes shaded like the sides of blocks, so the distant terrain matches the blocks next to it and follows
-   resource packs. In wooded biomes (forests, taiga, jungle, mangrove swamps, cherry groves, savannas and others) the surface is raised to
-   where the tree tops would be, in patches as dense as the trees of the biome, and painted in the color of their leaves.
+   resource packs. Coasts are drawn as sharp lines at one height: every sample keeps its land and its water color apart, water next
+   to land is lowered a little, and the coast is put where the ground reaches the level of the water, along the shape of the ground,
+   smoothed along a smooth line, with steps straightened and corners rounded off (high shores are cut back a little, sloping gently down to the water; narrow islands, peninsulas and rivers stay; far away, along a grid three times finer than the samples): the ground
+   next to the coast is moved a little so that it still reaches the water exactly along the smoothed line. The snow line and the edges of
+   forests are drawn the same way, sharp: snow at the height where it starts in the biome, forests where their tree tops end (a little soft; sparse trees of savannas and swamps stay blended), and borders between biomes of clearly different colors, and between waters of different temperatures are drawn as a soft line; borders on land and borders between waters each have a color of their own on the samples, so both run on across coasts, instead of blending land into water over a whole cell. In wooded biomes (forests, taiga, jungle, mangrove swamps, cherry groves, savannas and others) the surface is raised to
+   where the tree tops would be, in patches as dense as the trees of the biome and thinning out on steep slopes, and painted in the color of their leaves. Ice spikes biomes get their spikes the same way, pointed and in the color of packed ice.
+   Every tile shapes its borders together with a margin of its neighbours' samples, so two tiles always agree on their shared edge
+   instead of showing a line there; a tile whose neighbour arrives later is built again once.
 4. Near tiles find the surface exactly by sampling the noise density. Far tiles (32+ blocks between samples) use the generator's 2D
-   surface estimate, which is checked against the exact surface on every tile, and take 3×3 sub-samples per cell whose colors the
+   surface estimate, which is checked against the exact surface on every tile and corrected by it near the sea level (where a few
+   blocks decide between land and sea). They look for that surface in the generator's terrain without its caves, which is much
+   cheaper to sample and the same where it can be seen from that far. They take 3×3 sub-samples per cell whose colors the
    client averages, so the world does not turn into noise made of random islands when seen from far away. The climate that picks
    the biomes is sampled for the whole tile at once, and everything sampled afterwards reuses it from the cache.
 5. Detailed tiles are built from real blocks: chunks loaded on the server are read directly and chunks saved on disk are read from
    the region files without loading them into the world; only the sections near the surface are decoded. For every column up to
    three runs of blocks are kept: water, leaves and other blocks that can be seen through are runs of their own, so the ground under
-   them is drawn too. They are drawn as boxes with the block textures (or their colors), with grass, leaves and water tinted by the
+   them is drawn too, and so is what lies on water (ice, lily pads), which floats instead of reaching down to the bottom. They are drawn as boxes with the block textures (or their colors), with grass, leaves and water tinted by the
    biome. Next to the player every cell is one block; cells get coarser with distance, up to one cell per 4 blocks. Region files are read a few chunks at a time, so the
    server's own chunk loading never waits on LOD work.
    When blocks change, the server notes the chunk (a few bytes, nothing extra is saved) and the detailed tiles over it are loaded
@@ -133,13 +148,16 @@ are generated for it, the number of generator threads, the request queue per pla
    show through real blocks.
    The higher the camera, the finer the tiles: from above the terrain is seen head-on instead of at a grazing angle. When the camera
    goes past the far plane of the vanilla renderer, the ground below the player is drawn by LOD as well.
-8. Finished tiles are cached in the world folder (`<world>/farplanetwocontinuation/`) and are never generated twice.
+8. Finished tiles are cached in the world folder (`<world>/farplanetwocontinuation/`) and are never generated twice. When a new
+   version of the mod stores them differently, the outdated cache is cleared on the first start and made again.
 9. The client builds meshes on a background thread and draws them through Minecraft's own rendering API (renderpearl): a separate
    pass before vanilla terrain, with its own projection fitted to the visible tiles. Where two layers cover the same place, the
    more detailed one wins: vanilla over detailed tiles, detailed tiles over rough ones. This costs nothing on the CPU: less
    detailed layers are only moved a little away from the camera for the depth test. Detailed tiles are left out wherever vanilla
-   (or Sodium) already draws a chunk, and their back faces are culled, so walls of neighbouring tiles never flicker. Afterwards
-   the depth is written again in vanilla's own depth range, so clouds behind LOD mountains are hidden.
+   (or Sodium) already draws a chunk. All LOD terrain is drawn from the front only: the distant surface faces up and the skirts that
+   close the gaps between tiles of different detail face out of their tile and reach only as deep as needed, so from under the
+   ground hardly anything of it shows, and walls of neighbouring tiles never flicker. Afterwards the depth is written again in
+   vanilla's own depth range beyond vanilla's render distance, so clouds behind LOD mountains are hidden.
 10. Finished meshes are uploaded to the GPU for a few milliseconds per frame at most; big ones are written in parts over several
     frames, so loading never stalls a frame. When frames run late, the background work of the mod pauses for a moment and leaves
     the CPU to the game. How much it holds back follows the player's speed (see Loading While Moving): walking, frames come first;
@@ -166,7 +184,8 @@ OpenGL, LTW (GL on top of GLES 3), Zink/Freedreno, Vulkan. Limits of LTW were ta
 ## Safety
 
 - No native code, JNI, `Unsafe`, process launching or network connections other than Minecraft's own channel. Reflection is used
-  only to call one public method of Sodium (whether a chunk section is built), and only when Sodium is installed. On rooted devices the mod gets no extra permissions and touches nothing outside the game.
+  only to call one public method of Sodium (whether a chunk section is built), and only when Sodium is installed, and to read once
+  per biome whether its temperature changes from place to place (Minecraft keeps that private). On rooted devices the mod gets no extra permissions and touches nothing outside the game.
 - Files are written in two places only: `config/` (two JSON files) and `<world folder>/farplanetwocontinuation/`. File names are built
   from numbers and a sanitized dimension name, and every path is checked to stay inside the cache root. Writes are atomic (through a
   temporary file).
@@ -193,7 +212,9 @@ FarPlaneTwoContinuation is released under the [MIT License](LICENSE.txt).
 The jar ends up in `build/libs/FarPlaneTwoContinuation-x.x.x.jar`.
 
 `./gradlew build -Pdebug_build` makes a debug jar that writes detailed performance logs (frame times, uploads, background threads,
-CPU frequencies, temperatures) and every settings change to `latest.log`, for finding the cause of stutters on a device.
+CPU frequencies, temperatures, the parts of the client tick and of tile generation) and every settings change to `latest.log`, for
+finding the cause of stutters on a device. In it, parts of the distant terrain can be turned off or marked in color by creating
+files named `farplane-debug-...` in `config/` while the game runs.
 
 ## Who made this mod
 

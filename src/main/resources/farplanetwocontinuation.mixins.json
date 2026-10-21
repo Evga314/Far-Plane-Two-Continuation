@@ -7,7 +7,8 @@
     "ChunkGeneratorAccess",
     "LevelChunkMixin",
     "MaterialSystemMixin",
-    "NoiseBasedChunkGeneratorAccess"
+    "NoiseBasedChunkGeneratorAccess",
+    "StructurePaletteMixin"
   ],
   "injectors": {
     "defaultRequire": 1

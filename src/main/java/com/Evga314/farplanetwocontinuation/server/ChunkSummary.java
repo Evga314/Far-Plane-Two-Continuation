@@ -20,6 +20,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -50,6 +51,26 @@ public final class ChunkSummary {
 
     /** Plants and other small things without collision are drawn on the ground instead of as blocks, up from this height. */
     private static final int PLANT_MIN_HEIGHT = 4;
+    /** Thickest a run floating on a liquid can be (ice, lily pads), see scan; ground over a flooded cave is thicker. */
+    private static final int FLOATING_THICKNESS = 2;
+    /**
+     * A run at least this thick that is neither liquid nor seen through counts as the ground when runs are joined: structure floors,
+     * roofs and canopies are thinner.
+     */
+    private static final int GROUND_THICKNESS = 6;
+    /** The runs of the column being scanned, kept per thread instead of made for each of the many columns. */
+    private static final ThreadLocal<Scratch> SCRATCH = ThreadLocal.withInitial(Scratch::new);
+
+    private static final class Scratch {
+        final int[] tops = new int[RUNS + 1];
+        final int[] bottoms = new int[RUNS + 1];
+        final int[] blocks = new int[RUNS + 1];
+        final int[] sides = new int[RUNS + 1];
+        final int[] heights = new int[RUNS + 1];
+        final boolean[] clear = new boolean[RUNS + 1];
+        final boolean[] liquid = new boolean[RUNS + 1];
+    }
+
     /** What a block state means for the summary, worked out once per state. */
     private static final Map<BlockState, Look> LOOKS = new ConcurrentHashMap<>();
 
@@ -231,12 +252,14 @@ public final class ChunkSummary {
         int base = column * RUNS;
         // One spare slot: when there are more runs than are kept, the two closest ones are joined, gap and all. Leaves join the ground
         // under them, while a ship floating high above an island stays a ship instead of a pillar down to the ground.
-        int[] runTops = new int[RUNS + 1];
-        int[] runBottoms = new int[RUNS + 1];
-        int[] runBlocks = new int[RUNS + 1];
-        int[] runSides = new int[RUNS + 1];
-        int[] runHeights = new int[RUNS + 1];
-        boolean[] runClear = new boolean[RUNS + 1];
+        Scratch scratch = SCRATCH.get();
+        int[] runTops = scratch.tops;
+        int[] runBottoms = scratch.bottoms;
+        int[] runBlocks = scratch.blocks;
+        int[] runSides = scratch.sides;
+        int[] runHeights = scratch.heights;
+        boolean[] runClear = scratch.clear;
+        boolean[] runLiquid = scratch.liquid;
         int plant = 0;
         int plantY = Integer.MIN_VALUE;
         int runs = 0;
@@ -263,14 +286,16 @@ public final class ChunkSummary {
             int under = -1;
             int height = look.height;
             boolean clear = look.clear;
+            boolean liquid = look.liquid;
             while (y >= limit) {
                 Look below = look(source.state(x, y, z));
                 int depth = runTop - 1 - y;
                 // A thin block on top (snow on a tree, leaf litter, a carpet) always belongs to what it lies on: it covers only the top,
-                // the sides are that block, and the run can be seen through when that block can.
-                boolean underThin = depth == 1 && height < 16 && below.block >= 0;
+                // the sides are that block, and the run can be seen through when that block can. Not on a liquid: a lily pad floats.
+                boolean underThin = depth == 1 && height < 16 && below.block >= 0 && below.liquid == liquid;
                 // Water, leaves and other blocks that can be seen through are separate runs from the ground under them: it is seen too.
-                if (below.block < 0 || below.clear != clear && !underThin) {
+                // So are blocks on liquids, though both can be seen through: ice floats on the water instead of reaching to its bottom.
+                if (below.block < 0 || (below.clear != clear || below.liquid != liquid) && !underThin) {
                     break;
                 }
                 if (underThin) {
@@ -296,15 +321,31 @@ public final class ChunkSummary {
             runSides[runs] = side == block && under >= 0 ? under : side;
             runHeights[runs] = height;
             runClear[runs] = clear;
+            runLiquid[runs] = liquid;
             runs++;
             if (runs > RUNS) {
                 // A joined run keeps the look of the upper one, so water or leaves joined with the ground under them would hide that
                 // ground, which is seen through them. That is never done while anything else can be joined; ground with water under it, a
-                // flooded cave, is joined like any other run.
+                // flooded cave, is joined like any other run. Least of all a thin block floating on a liquid with it (ice, a lily pad):
+                // it would reach down to the bottom. Only thin ones at the top of the column: ground over a flooded cave, or a thin floor
+                // of gravel over a pocket of water under the seabed, kept from that would have the water over it joined with it
+                // instead, the seabed turning into a shaft of water.
+                // Under the ground the gaps are caves no one sees from outside: those are joined first. Over it the floors and roofs of
+                // a structure are joined with each other next, and the gap between a structure and the ground under it last of all: a
+                // tower on legs or a platform over the ground stays standing over it instead of becoming a pillar down to the ground.
+                int ground = runs;
+                for (int i = 0; i < runs; i++) {
+                    if (!runLiquid[i] && !runClear[i] && runTops[i] - runBottoms[i] >= GROUND_THICKNESS) {
+                        ground = i;
+                        break;
+                    }
+                }
                 int closest = 0;
                 long closestCost = Long.MAX_VALUE;
                 for (int i = 0; i < runs - 1; i++) {
-                    long cost = runBottoms[i] - runTops[i + 1] + (runClear[i] && !runClear[i + 1] ? 1L << 32 : 0L);
+                    boolean floating = i == 0 && !runLiquid[i] && runLiquid[i + 1] && runTops[i] - runBottoms[i] <= FLOATING_THICKNESS;
+                    long cost = runBottoms[i] - runTops[i + 1] + (runClear[i] && !runClear[i + 1] ? 1L << 32 : 0L)
+                        + (floating ? 1L << 33 : 0L) + (i + 1 < ground ? 1L << 30 : i + 1 == ground ? 1L << 31 : 0L);
                     if (cost < closestCost) {
                         closestCost = cost;
                         closest = i;
@@ -318,6 +359,7 @@ public final class ChunkSummary {
                     runSides[i] = runSides[i + 1];
                     runHeights[i] = runHeights[i + 1];
                     runClear[i] = runClear[i + 1];
+                    runLiquid[i] = runLiquid[i + 1];
                 }
                 runs--;
             }
@@ -354,6 +396,11 @@ public final class ChunkSummary {
         if (state.isAir()) {
             return Look.NOTHING;
         }
+        // Blocks that show nothing but their liquid (a bubble column over magma) are that liquid: as blocks of their own they would
+        // stand as pillars in the water.
+        if (state.getRenderShape() == net.minecraft.world.level.block.RenderShape.INVISIBLE && !state.getFluidState().isEmpty()) {
+            state = state.getFluidState().createLegacyBlock();
+        }
         int id = BuiltInRegistries.BLOCK.getId(state.getBlock());
         int height = 16;
         boolean plant = false;
@@ -362,7 +409,10 @@ public final class ChunkSummary {
             if (!outline.isEmpty()) {
                 height = Mth.clamp((int) Math.ceil(outline.max(Direction.Axis.Y) * 16.0 - 1.0E-4), 1, 16);
             }
-            plant = state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty() && !outline.isEmpty() && height > PLANT_MIN_HEIGHT;
+            // Snow layers and powder snow have no collision either, but they are cover, not plants: a full cube (powder snow) or snow
+            // layers from three up pass the height test below and would be drawn as crossed quads instead of the box they are.
+            plant = state.getBlock() != Blocks.SNOW && !Block.isShapeFullBlock(outline)
+                && state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty() && !outline.isEmpty() && height > PLANT_MIN_HEIGHT;
         } catch (RuntimeException e) {
             // Some modded blocks need a real world for their shape; they count as full blocks.
             height = 16;
@@ -370,24 +420,24 @@ public final class ChunkSummary {
         FluidState fluid = state.getFluidState();
         if (plant) {
             if (!fluid.isEmpty()) {
-                return new Look(BuiltInRegistries.BLOCK.getId(fluid.createLegacyBlock().getBlock()), 16, 0, true);
+                return new Look(BuiltInRegistries.BLOCK.getId(fluid.createLegacyBlock().getBlock()), 16, 0, true, true);
             }
-            return new Look(-1, 16, id, false);
+            return new Look(-1, 16, id, false, false);
         }
         if (state.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).id == 0) {
             return Look.NOTHING;
         }
         boolean liquid = !fluid.isEmpty() && fluid.createLegacyBlock().getBlock() == state.getBlock();
-        return new Look(id, height, 0, liquid || !state.canOcclude());
+        return new Look(id, height, 0, liquid || !state.canOcclude(), liquid);
     }
 
     /**
      * {@code block}: raw id when drawn as a block, -1 when not; {@code plant}: raw id when it is a plant on the ground, else 0;
      * {@code clear}: seen through, so the ground under it stays a run of its own: water, lava, plants growing in them, leaves and
-     * other blocks that do not hide what is behind them.
+     * other blocks that do not hide what is behind them; {@code liquid}: a liquid, or a plant growing in one.
      */
-    private record Look(int block, int height, int plant, boolean clear) {
-        static final Look NOTHING = new Look(-1, 16, 0, false);
+    private record Look(int block, int height, int plant, boolean clear, boolean liquid) {
+        static final Look NOTHING = new Look(-1, 16, 0, false, false);
     }
 
     /** Read-only access to the sections of one chunk, either a live chunk or one parsed from disk. */

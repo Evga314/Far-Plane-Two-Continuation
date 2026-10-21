@@ -4,6 +4,7 @@
   "package": "com.Evga314.farplanetwocontinuation.mixin.client",
   "compatibilityLevel": "JAVA_25",
   "client": [
+    "CameraMixin",
     "FogRendererMixin",
     "GameRendererMixin",
     "KeyboardHandlerMixin",

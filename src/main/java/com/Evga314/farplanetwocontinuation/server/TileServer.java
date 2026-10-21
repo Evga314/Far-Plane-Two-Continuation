@@ -82,8 +82,11 @@ public final class TileServer {
     private final Map<UUID, PlayerState> players = new HashMap<>();
     private final Map<CacheKey, byte[]> memoryCache;
     private final AtomicBoolean clearing = new AtomicBoolean();
+    /** Counts the clears of the cache: a tile generated while one ran is not written, as it could bring back what was cleared. */
+    private final java.util.concurrent.atomic.AtomicInteger cacheEpoch = new java.util.concurrent.atomic.AtomicInteger();
     private int ticks;
     private @Nullable Pregen pregen;
+    private @Nullable DistantPregen distantPregen;
     private final Map<CacheKey, DetailEntry> detailCache = new LinkedHashMap<>(256, 0.75F, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<CacheKey, DetailEntry> eldest) {
@@ -98,6 +101,7 @@ public final class TileServer {
         // Detailed tiles are what the player sees up close, so they get the CPU before distant terrain; both stay below the game.
         this.executor = createExecutor("FarPlane tile generator #", threads, Thread.MIN_PRIORITY, this.workers);
         this.detailExecutor = createExecutor("FarPlane detail reader #", config.resolvedDetailThreads(), Thread.NORM_PRIORITY - 1, this.workers);
+        TileDiskCache.clearIfOutdated(server.getWorldPath(LevelResource.ROOT));
         this.diskCache = config.diskCache ? new TileDiskCache(server.getWorldPath(LevelResource.ROOT), server.overworld().getSeed()) : null;
         this.virtualChunks = new VirtualChunkStore(server.getWorldPath(LevelResource.ROOT), server.overworld().getSeed());
         int memoryLimit = config.memoryCacheTiles;
@@ -160,6 +164,7 @@ public final class TileServer {
         if (!this.clearing.compareAndSet(false, true)) {
             return;
         }
+        this.cacheEpoch.incrementAndGet();
         this.forget(dimension);
         Thread cleaner = new Thread(() -> {
             try {
@@ -202,6 +207,7 @@ public final class TileServer {
      */
     public void tick() {
         this.pumpPregen();
+        this.pumpDistantPregen();
         if (ServerPerf.ON && this.ticks % 100 == 0) {
             int rough = 0;
             int detail = 0;
@@ -267,7 +273,7 @@ public final class TileServer {
         }
         if (this.pregen != null) {
             source.sendFailure(FarPlaneCommand.message("busy",
-                "Detailed terrain is already being generated (%s%%). Stop it first with /farplane pregen stop", this.pregen.percent()));
+                "Detailed terrain is already being generated (%s%%). Stop it first with /farplane pregen detail stop", this.pregen.percent()));
             return false;
         }
         int size = FarPlaneConstants.tileSize(FarPlaneConstants.DETAIL_MAX_LEVEL) / 16;
@@ -365,6 +371,250 @@ public final class TileServer {
         }
     }
 
+    /**
+     * Generates the distant terrain around a point ahead of time, into the tile cache on disk: every level the distant terrain may
+     * draw there, as far as it draws it (see {@link DistantPregen#TILES_PER_REACH}), coarse levels first, so the view is covered
+     * soonest. All generator threads the CPU has room for work on it, at the lowest priority; tiles players wait for go first, and
+     * detailed tiles only go on one at a time meanwhile.
+     */
+    boolean startDistantPregen(CommandSourceStack source, ServerLevel level, double centerX, double centerZ, int radius) {
+        if (this.diskCache == null || !TileGenerator.supports(level)) {
+            source.sendFailure(FarPlaneCommand.message("distant_disabled",
+                "Distant terrain can only be generated ahead of time with the tile cache on disk turned on, in dimensions it is drawn in"));
+            return false;
+        }
+        if (this.distantPregen != null) {
+            source.sendFailure(FarPlaneCommand.message("distant_busy",
+                "Distant terrain is already being generated (%s%%). Stop it first with /farplane pregen distant stop", this.distantPregen.percent()));
+            return false;
+        }
+        List<TilePos> tiles = new ArrayList<>();
+        int minLevel = Math.max(this.config.minLevel, DistantPregen.MIN_LEVEL);
+        for (int tileLevel = FarPlaneConstants.MAX_LEVEL; tileLevel >= minLevel; tileLevel--) {
+            long size = FarPlaneConstants.tileSize(tileLevel);
+            double reach = Math.min(radius, DistantPregen.TILES_PER_REACH * (double) size);
+            int minX = (int) Math.floorDiv((long) Math.floor(centerX - reach), size);
+            int maxX = (int) Math.floorDiv((long) Math.floor(centerX + reach), size);
+            int minZ = (int) Math.floorDiv((long) Math.floor(centerZ - reach), size);
+            int maxZ = (int) Math.floorDiv((long) Math.floor(centerZ + reach), size);
+            List<TilePos> ring = new ArrayList<>();
+            for (int z = minZ; z <= maxZ; z++) {
+                for (int x = minX; x <= maxX; x++) {
+                    TilePos tile = new TilePos(tileLevel, x, z);
+                    if (tile.isInsideWorld() && tile.distanceTo(centerX, centerZ) <= reach) {
+                        ring.add(tile);
+                    }
+                }
+            }
+            ring.sort(Comparator.comparingDouble(tile -> tile.distanceTo(centerX, centerZ)));
+            tiles.addAll(ring);
+        }
+        int threads = Math.max(this.config.resolvedThreads(), Runtime.getRuntime().availableProcessors() - 1);
+        this.executor.setMaximumPoolSize(Math.max(threads, this.executor.getMaximumPoolSize()));
+        this.executor.setCorePoolSize(threads);
+        this.distantPregen = new DistantPregen(source, level, tiles, threads, Util.getMillis());
+        this.distantPregen.showProgressBar(this.server);
+        source.sendSuccess(() -> FarPlaneCommand.message("distant_started",
+            "Generating distant terrain within %s blocks: %s tiles", radius, tiles.size()), true);
+        return true;
+    }
+
+    void stopDistantPregen(CommandSourceStack source) {
+        DistantPregen running = this.distantPregen;
+        if (running == null) {
+            source.sendFailure(FarPlaneCommand.message("distant_none", "No distant terrain is being generated"));
+            return;
+        }
+        this.endDistantPregen();
+        source.sendSuccess(() -> FarPlaneCommand.message("distant_stopped",
+            "Distant terrain generation stopped: %s of %s tiles done", running.done.get(), running.tiles.size()), true);
+    }
+
+    void distantPregenStatus(CommandSourceStack source) {
+        DistantPregen running = this.distantPregen;
+        if (running == null) {
+            source.sendSuccess(() -> FarPlaneCommand.message("distant_none", "No distant terrain is being generated"), false);
+            return;
+        }
+        source.sendSuccess(running::progressMessage, false);
+    }
+
+    private void endDistantPregen() {
+        this.distantPregen = null;
+        int threads = this.config.resolvedThreads();
+        this.executor.setCorePoolSize(threads);
+        this.executor.setMaximumPoolSize(threads);
+    }
+
+    private void pumpDistantPregen() {
+        DistantPregen running = this.distantPregen;
+        if (running == null) {
+            return;
+        }
+        if (this.ticks % 20 == 0) {
+            running.showProgressBar(this.server);
+        }
+        if (running.shouldReport()) {
+            running.tell(running.progressMessage());
+        }
+        TileDiskCache cache = this.diskCache;
+        Identifier dimension = running.level.dimension().identifier();
+        // Tiles players ask for are in the queue first; this only fills the threads left idle.
+        while (cache != null && running.next < running.tiles.size() && running.inFlight.get() < running.threads
+            && this.executor.getQueue().isEmpty()) {
+            TilePos tile = running.tiles.get(running.next++);
+            running.inFlight.incrementAndGet();
+            try {
+                this.executor.execute(() -> {
+                    try {
+                        if (!cache.has(dimension, tile)) {
+                            int epoch = this.cacheEpoch.get();
+                            byte[] encoded = TileGenerator.generate(running.level, tile).encode();
+                            if (!this.clearing.get() && this.cacheEpoch.get() == epoch) {
+                                cache.write(dimension, tile, encoded);
+                            }
+                        }
+                    } catch (WorkThrottle.Cancelled e) {
+                        return;
+                    } catch (Exception e) {
+                        LOGGER.warn("Failed to pre-generate distant tile {}", tile, e);
+                    } finally {
+                        running.done.incrementAndGet();
+                        running.inFlight.decrementAndGet();
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                running.inFlight.decrementAndGet();
+                this.endDistantPregen();
+                return;
+            }
+        }
+        if (running.next >= running.tiles.size() && running.inFlight.get() == 0) {
+            this.endDistantPregen();
+            running.showProgressBar(this.server);
+            long seconds = (Util.getMillis() - running.started) / 1000L;
+            running.source.sendSuccess(() -> FarPlaneCommand.message("distant_done",
+                "Distant terrain generated: %s tiles in %s min %s s", running.tiles.size(), seconds / 60L, seconds % 60L), true);
+        }
+    }
+
+    /** A running pre-generation of distant terrain, see {@link #startDistantPregen}. Its fields are touched on the server thread. */
+    private static final class DistantPregen {
+        /** Finer levels lie inside the detailed terrain and vanilla's chunks. */
+        static final int MIN_LEVEL = 2;
+        /**
+         * How far from the point, in tile sizes, the tiles of a level are made: the distant terrain splits a tile once it is closer than
+         * a few times its size, and keeps coarser ones a little beyond as stand-ins.
+         */
+        static final int TILES_PER_REACH = 12;
+
+        final CommandSourceStack source;
+        final ServerLevel level;
+        final List<TilePos> tiles;
+        final int threads;
+        final long started;
+        final AtomicInteger inFlight = new AtomicInteger();
+        final AtomicInteger done = new AtomicInteger();
+        /** The player who started it, shown the progress above the hotbar; null when started from the console. */
+        private final @Nullable UUID player;
+        int next;
+        private int lastReportedTenth;
+        private long lastReport;
+        private double shownSeconds = -1.0;
+        private long shownAt;
+
+        DistantPregen(CommandSourceStack source, ServerLevel level, List<TilePos> tiles, int threads, long started) {
+            this.source = source;
+            this.level = level;
+            this.tiles = tiles;
+            this.threads = threads;
+            this.started = started;
+            this.lastReport = started;
+            ServerPlayer player = source.getPlayer();
+            this.player = player == null ? null : player.getUUID();
+        }
+
+        int percent() {
+            return this.tiles.isEmpty() ? 100 : this.done.get() * 100 / this.tiles.size();
+        }
+
+        /**
+         * Seconds left, or -1 while there is no estimate yet. Tiles are made side by side, so the time left comes from the pace so far;
+         * the shown value counts down every second and follows it smoothly, quickly down and slowly up.
+         */
+        private long secondsLeft() {
+            int done = this.done.get();
+            if (done >= this.tiles.size()) {
+                return 0L;
+            }
+            if (this.percent() < ESTIMATE_FROM_PERCENT) {
+                return -1L;
+            }
+            long now = Util.getMillis();
+            double estimate = (now - this.started) / 1000.0 / done * (this.tiles.size() - done);
+            if (this.shownSeconds < 0.0) {
+                this.shownSeconds = estimate;
+            } else {
+                this.shownSeconds = Math.max(0.0, this.shownSeconds - (now - this.shownAt) / 1000.0);
+                this.shownSeconds += (estimate - this.shownSeconds) * (estimate < this.shownSeconds ? 0.15 : 0.02);
+            }
+            this.shownAt = now;
+            return Math.round(this.shownSeconds);
+        }
+
+        /** A short progress line at the bottom of the screen of the player who started it, refreshed every second. */
+        void showProgressBar(MinecraftServer server) {
+            long left = this.secondsLeft();
+            ServerPlayer target = this.player == null ? null : server.getPlayerList().getPlayer(this.player);
+            if (target == null) {
+                return;
+            }
+            if (left < 0L) {
+                String dots = ".".repeat((int) (Util.getMillis() / 1000L % 3L) + 1);
+                target.sendOverlayMessage(FarPlaneCommand.message("distant_bar_estimating", "Distant terrain: %s%% (%s of %s), estimating the time left%s",
+                    this.percent(), this.done.get(), this.tiles.size(), dots));
+                return;
+            }
+            String time = String.format(Locale.ROOT, "%d:%02d", left / 60L, left % 60L);
+            target.sendOverlayMessage(FarPlaneCommand.message("distant_bar", "Distant terrain: %s%% (%s of %s), %s minutes left",
+                this.percent(), this.done.get(), this.tiles.size(), time));
+        }
+
+        /** Every 10% and at least every half minute. */
+        boolean shouldReport() {
+            int tenth = this.percent() / 10;
+            long now = Util.getMillis();
+            if (tenth > this.lastReportedTenth || now - this.lastReport > REPORT_MS) {
+                this.lastReportedTenth = tenth;
+                this.lastReport = now;
+                return this.done.get() < this.tiles.size();
+            }
+            return false;
+        }
+
+        Component progressMessage() {
+            long left = this.secondsLeft();
+            if (left < 0L) {
+                return FarPlaneCommand.message("distant_progress_estimating", "Distant terrain: %s%% (%s of %s tiles), estimating the time left",
+                    this.percent(), this.done.get(), this.tiles.size());
+            }
+            return FarPlaneCommand.message("distant_progress", "Distant terrain: %s%% (%s of %s tiles), about %s min %s s left",
+                this.percent(), this.done.get(), this.tiles.size(), left / 60L, left % 60L);
+        }
+
+        void tell(Component message) {
+            try {
+                this.source.sendSuccess(() -> message, false);
+            } catch (RuntimeException e) {
+                LOGGER.debug("Could not report pre-generation progress", e);
+            }
+        }
+
+        private static final long REPORT_MS = 30_000L;
+        /** Below this share of the tiles done the time left is not shown yet, see Pregen. */
+        private static final int ESTIMATE_FROM_PERCENT = 3;
+    }
+
     public void onDisconnect(UUID player) {
         this.players.remove(player);
     }
@@ -437,9 +687,11 @@ public final class TileServer {
         }
         this.pump(player, state, false, this.config.maxInFlightPerPlayer, detailBusy);
         // As many detailed tiles at once as loading is urgent for this player: one or a few while walking, all threads while flying.
+        // While distant terrain is generated ahead of time, detailed tiles go on in the background, one at a time.
         int calm = this.config.resolvedCalmDetailThreads();
         int all = this.config.resolvedDetailThreads();
-        this.pump(player, state, true, calm + Math.round((all - calm) * state.urgency), false);
+        int detailLimit = this.distantPregen != null ? 1 : calm + Math.round((all - calm) * state.urgency);
+        this.pump(player, state, true, detailLimit, false);
     }
 
     private void pump(ServerPlayer player, PlayerState state, boolean detail, int limit, boolean refineSlowly) {
@@ -600,8 +852,9 @@ public final class TileServer {
             encoded = this.diskCache.read(dimension, pos);
         }
         if (encoded == null) {
+            int epoch = this.cacheEpoch.get();
             encoded = TileGenerator.generate(level, pos).encode();
-            if (this.diskCache != null) {
+            if (this.diskCache != null && !this.clearing.get() && this.cacheEpoch.get() == epoch) {
                 this.diskCache.write(dimension, pos, encoded);
             }
         }
@@ -640,6 +893,7 @@ public final class TileServer {
      * next checkpoint. Waits a few seconds for them, so nothing is written to the world folder after the world is closed.
      */
     public void close() {
+        this.distantPregen = null;
         this.workers.forEach(WorkThrottle.Worker::cancel);
         this.executor.getQueue().clear();
         this.detailExecutor.getQueue().clear();

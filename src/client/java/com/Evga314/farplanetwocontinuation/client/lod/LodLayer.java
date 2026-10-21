@@ -44,7 +44,7 @@ abstract class LodLayer {
      */
     static final double LEAF_SHARE = 0.6;
     private static final int MIN_LEAVES = 16;
-    /** Meshes bigger than this are written to the GPU in parts of this size, one or more per frame. */
+    /** Meshes are written to the GPU in parts of this size, one or more per frame. */
     private static final int UPLOAD_PART_BYTES = 256 * 1024;
 
     private final String name;
@@ -177,6 +177,10 @@ abstract class LodLayer {
 
     void reset() {
         this.epoch++;
+        this.planTick = Long.MIN_VALUE / 2;
+        this.changed = true;
+        this.keptParents.clear();
+        this.keptChildren.clear();
         if (this.partial != null) {
             this.partial.buffer.close();
             this.partial = null;
@@ -212,6 +216,7 @@ abstract class LodLayer {
             }
             this.empty.remove(key);
         }
+        this.changed = true;
     }
 
     /** Lowest level this layer can have tiles of. */
@@ -236,18 +241,28 @@ abstract class LodLayer {
         if (this.building.contains(key) || this.building.size() >= MAX_BUILD_BACKLOG) {
             return;
         }
+        this.submit(key, epoch -> this.build(bytes, key, epoch, biomes, seaLevel));
+    }
+
+    /** Something a mesh builder thread makes a tile's mesh with, for the epoch it was started in. */
+    interface Work {
+        TileMeshBuilder.Built run(int epoch) throws Exception;
+    }
+
+    /** Builds a tile's mesh on a mesh builder thread; it replaces the one drawn when it is uploaded. */
+    final void submit(long key, Work work) {
         int buildEpoch = this.epoch;
         this.building.add(key);
         try {
             this.meshExecutor.execute(() -> {
                 try {
                     long start = PerfLog.ON ? System.nanoTime() : 0L;
-                    this.built.add(this.build(bytes, key, buildEpoch, biomes, seaLevel));
+                    this.built.add(work.run(buildEpoch));
                     if (PerfLog.ON) {
                         PerfLog.meshBuilt(System.nanoTime() - start);
                     }
                 } catch (Exception e) {
-                    LOGGER.debug("Dropping bad {} tile {}", this.name, pos, e);
+                    LOGGER.debug("Dropping bad {} tile {}", this.name, TilePos.unpack(key), e);
                     this.built.add(TileMeshBuilder.Built.failed(key, buildEpoch));
                 }
             });
@@ -256,13 +271,27 @@ abstract class LodLayer {
         }
     }
 
+    final boolean isBuilding(long key) {
+        return this.building.contains(key);
+    }
+
+    final int buildingCount() {
+        return this.building.size();
+    }
+
     /**
-     * Uploads finished meshes on the render thread until the budget of meshes or the time of this frame runs out; at least one is
-     * uploaded per call, so loading never stops. Returns how much of the budget is left.
+     * Uploads finished meshes on the render thread until the budget of meshes or the time of this frame runs out; at least one
+     * part is written per call, so loading never stops. Returns how much of the budget is left.
      */
     int upload(int budget, long deadline) {
+        int startBudget = budget;
         while (budget > 0) {
             if (this.partial == null) {
+                // A single upload cannot be interrupted once it starts, so past the deadline no new mesh is started in this call
+                // once one has gone up; the rest wait for the next frame.
+                if (budget < startBudget && System.nanoTime() >= deadline) {
+                    break;
+                }
                 TileMeshBuilder.Built result = this.built.poll();
                 if (result == null) {
                     break;
@@ -278,22 +307,15 @@ abstract class LodLayer {
                         this.retired.add(old);
                     }
                     this.empty.put(result.key(), Util.getMillis());
+                    this.changed = true;
                     continue;
                 }
                 this.empty.remove(result.key());
                 TilePos pos = TilePos.unpack(result.key());
                 int bytes = result.vertices().remaining();
-                if (bytes <= UPLOAD_PART_BYTES) {
-                    GpuBuffer buffer = RenderSystem.getDevice().createBuffer(() -> "FarPlane " + this.name + " tile " + pos, GpuBuffer.USAGE_VERTEX, result.vertices());
-                    this.finishUpload(result, buffer);
-                    budget--;
-                    if (System.nanoTime() >= deadline) {
-                        break;
-                    }
-                    continue;
-                }
-                // Big meshes are written in parts over several frames: on phones a single big upload can stall a frame for tens of
-                // milliseconds. The tile is only drawn once all of it is there.
+                // Every mesh is written in parts over frames, a small one in a single part: on phones one upload of the data
+                // itself can stall a frame for tens of milliseconds, so only the empty buffer is made in one call and the data
+                // follows in parts, each followed by the deadline check below. The tile is only drawn once all of it is there.
                 GpuBuffer buffer = RenderSystem.getDevice().createBuffer(
                     () -> "FarPlane " + this.name + " tile " + pos, GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST, bytes
                 );
@@ -327,7 +349,12 @@ abstract class LodLayer {
         mesh.lastUsedTick = this.tick;
         TileMesh old = this.meshes.put(result.key(), mesh);
         if (old != null) {
+            // The same tile built again (with new neighbours or fresh data): the tree stays as it was, the new mesh just takes the
+            // old one's place, see quietTick.
+            old.replacedBy = mesh;
             this.retired.add(old);
+        } else {
+            this.changed = true;
         }
         this.onUploaded(mesh);
     }
@@ -350,17 +377,34 @@ abstract class LodLayer {
     void expirePending(long now) {
         this.pending.long2LongEntrySet().removeIf(entry -> now - entry.getLongValue() > REQUEST_TIMEOUT_MS);
         long retry = this.emptyRetryMs();
-        this.empty.long2LongEntrySet().removeIf(entry -> now - entry.getLongValue() > retry);
+        // A tile no longer counted as empty is not ready any more: the tree has to be walked again.
+        this.changed |= this.empty.long2LongEntrySet().removeIf(entry -> now - entry.getLongValue() > retry);
     }
 
     void select(LodView view, long tick, long now) {
         this.view = view;
         this.tick = tick;
         this.now = now;
+        double movedX = view.camX - this.walkX;
+        double movedY = view.camY - this.walkY;
+        double movedZ = view.camZ - this.walkZ;
+        boolean moved = movedX * movedX + movedY * movedY + movedZ * movedZ > QUIET_MOVE * QUIET_MOVE;
+        if (!this.changed && !moved && tick >= this.walkTick && tick - this.walkTick < WALK_TICKS) {
+            this.quietTick();
+            return;
+        }
+        this.changed = false;
+        this.walkTick = tick;
+        this.walkX = view.camX;
+        this.walkY = view.camY;
+        this.walkZ = view.camZ;
+        this.keptParents.clear();
+        this.keptChildren.clear();
         this.nextDrawList.clear();
         this.candidates.clear();
         this.readyStates.clear();
         this.relevantStates.clear();
+        this.distances.clear();
 
         double reach = this.reach();
         int rootLevel = this.minLevel();
@@ -379,19 +423,128 @@ abstract class LodLayer {
                 roots.add(new TilePos(rootLevel, (int) x, (int) z));
             }
         }
-        this.planSplits(roots);
+        boolean timed = PerfLog.ON && this instanceof RoughLayer;
+        long start = timed ? System.nanoTime() : 0L;
+        // The plan changes slowly: it is made again every few ticks, and at once when the camera has moved a bit.
+        double planMovedX = view.camX - this.planX;
+        double planMovedZ = view.camZ - this.planZ;
+        if (tick - this.planTick >= PLAN_TICKS || tick < this.planTick || planMovedX * planMovedX + planMovedZ * planMovedZ > PLAN_MOVE * PLAN_MOVE) {
+            this.planSplits(roots);
+            this.planTick = tick;
+            this.planX = view.camX;
+            this.planZ = view.camZ;
+        }
+        long planned = timed ? System.nanoTime() : 0L;
         for (TilePos root : roots) {
             this.visit(root);
         }
+        if (timed) {
+            PerfLog.tickPhase(7, planned - start);
+            PerfLog.tickPhase(8, System.nanoTime() - planned);
+            PerfLog.tickPhase(9, this.relevantStates.size());
+        }
+        if (!this.nextDrawList.equals(this.drawList)) {
+            this.drawListVersion++;
+        }
         this.drawList = List.copyOf(this.nextDrawList);
+        // Replaced meshes may have been in the last draw list; once a new one is made they are closed.
         this.closeRetired();
     }
+
+    /**
+     * A tick with nothing new for the tree: the camera has hardly moved and no tile came, went or changed. The last walk still holds,
+     * so it is not done again (the walk is most of the client tick with many tiles). What the walk does for every tile drawn is done
+     * here only: they and the stand-ins kept with them count as used, and the cuts the manager sets after the walk start over. Changed
+     * tiles and refreshes are asked for at the next walk, at most {@link #WALK_TICKS} later.
+     */
+    private void quietTick() {
+        if (!this.retired.isEmpty()) {
+            this.putReplacements();
+        }
+        for (TileMesh mesh : this.drawList) {
+            mesh.lastUsedTick = this.tick;
+            mesh.discardRadius = 0.0F;
+            mesh.keepRadius = 0.0F;
+            mesh.fadeWidth = 0.0F;
+        }
+        for (TileMesh mesh : this.keptParents) {
+            mesh.lastUsedTick = Math.max(mesh.lastUsedTick, this.tick - 1);
+        }
+        for (TileMesh mesh : this.keptChildren) {
+            mesh.lastUsedTick = this.tick;
+        }
+        if (PerfLog.ON && this instanceof RoughLayer) {
+            PerfLog.tickPhase(10, 1L);
+        }
+    }
+
+    /**
+     * Puts the meshes of tiles built again where the old ones were drawn or kept, then closes the old ones. Only meshes replaced by
+     * one of the same tile are retired between walks: a tile that came, went or turned empty makes the next tick walk the tree.
+     */
+    private void putReplacements() {
+        boolean drawn = false;
+        for (TileMesh mesh : this.drawList) {
+            if (mesh.replacedBy != null) {
+                drawn = true;
+                break;
+            }
+        }
+        if (drawn) {
+            this.nextDrawList.clear();
+            for (TileMesh mesh : this.drawList) {
+                this.nextDrawList.add(latest(mesh));
+            }
+            this.drawList = List.copyOf(this.nextDrawList);
+            this.drawListVersion++;
+        }
+        this.keptParents.replaceAll(LodLayer::latest);
+        this.keptChildren.replaceAll(LodLayer::latest);
+        this.closeRetired();
+    }
+
+    private static TileMesh latest(TileMesh mesh) {
+        while (mesh.replacedBy != null) {
+            mesh = mesh.replacedBy;
+        }
+        return mesh;
+    }
+
+    /** The draw list changes whenever this goes up; the rough layer walks again when the detailed one changes, see LodManager. */
+    int drawListVersion() {
+        return this.drawListVersion;
+    }
+
+    /** The next tick walks the tree again, whatever changed. */
+    void walkAgain() {
+        this.changed = true;
+    }
+
+    /** See select: the tree is walked again when something changed, the camera moved this far, or this many ticks went by. */
+    private static final double QUIET_MOVE = 4.0;
+    private static final int WALK_TICKS = 10;
+    private boolean changed = true;
+    private long walkTick = Long.MIN_VALUE / 2;
+    private double walkX;
+    private double walkY;
+    private double walkZ;
+    private int drawListVersion;
+    /** Meshes the last walk kept without drawing them: parents standing behind their children, and children loaded under a stand-in. */
+    private final ArrayList<TileMesh> keptParents = new ArrayList<>();
+    private final ArrayList<TileMesh> keptChildren = new ArrayList<>();
 
     /**
      * Decides up front which tiles may split, most important first (big tiles close to the camera), until the tiles on screen would
      * no longer fit into the GPU memory budget. With a small budget distant terrain simply stays coarser. Without this the wanted
      * tiles would not fit, and tiles would be evicted and loaded again every tick, which shows up as flickering.
      */
+    private long planTick = Long.MIN_VALUE / 2;
+    private double planX;
+    private double planZ;
+    /** See select: how often the split plan is made again, and how far the camera may move before it is made again at once. */
+    private static final int PLAN_TICKS = 5;
+    private static final double PLAN_MOVE = 16.0;
+
     private void planSplits(List<TilePos> roots) {
         this.allowedSplits.clear();
         int maxLeaves = Math.max(MIN_LEAVES, (int) (this.maxMeshes() * LEAF_SHARE));
@@ -439,35 +592,51 @@ abstract class LodLayer {
         if (cached != 0) {
             return cached > 0;
         }
+        // Only tiles within vanilla's distance can be covered by its chunks; the height of the others is not looked up at all.
         boolean relevant = pos.isInsideWorld()
             && pos.distanceTo(this.view.camX, this.view.camZ) <= this.reach()
             && this.extraRelevant(pos)
-            && !this.view.coveredByVanilla(pos, this.verticalDistance(pos, true));
+            && (pos.farthestDistanceTo(this.view.camX, this.view.camZ) >= this.view.vanillaRadius
+                || !this.view.coveredByVanilla(pos, this.verticalDistance(pos, true)));
         this.relevantStates.put(key, relevant ? (byte) 1 : (byte) -1);
         return relevant;
     }
 
     /** Vertical distance from the camera to the terrain of a tile, taken from the tile itself or the closest loaded parent. */
     double verticalDistance(TilePos pos, boolean farthest) {
-        TilePos current = pos;
+        int level = pos.level();
+        int x = pos.x();
+        int z = pos.z();
         double camY = this.view.camY;
-        while (current.level() <= this.maxLevel()) {
-            TileMesh mesh = this.meshes.get(current.pack());
+        while (level <= this.maxLevel()) {
+            TileMesh mesh = this.meshes.get(TilePos.pack(level, x, z));
             if (mesh != null) {
                 return farthest
                     ? Math.max(Math.abs(camY - mesh.terrainMinY), Math.abs(camY - mesh.maxY))
                     : Math.max(0.0, Math.max(camY - mesh.maxY, mesh.terrainMinY - camY));
             }
-            current = new TilePos(current.level() + 1, Math.floorDiv(current.x(), 2), Math.floorDiv(current.z(), 2));
+            level++;
+            x = Math.floorDiv(x, 2);
+            z = Math.floorDiv(z, 2);
         }
         return this.view.fallbackVertical(farthest);
     }
 
+    /** Cached per tick: the split plan, the walk and the requests all ask for it, several times per tile. */
     double effectiveDistance(TilePos pos) {
+        long key = pos.pack();
+        double cached = this.distances.getOrDefault(key, -1.0);
+        if (cached >= 0.0) {
+            return cached;
+        }
         double horizontal = pos.distanceTo(this.view.camX, this.view.camZ);
         double vertical = this.verticalDistance(pos, false);
-        return Math.sqrt(horizontal * horizontal + vertical * vertical);
+        double distance = Math.sqrt(horizontal * horizontal + vertical * vertical);
+        this.distances.put(key, distance);
+        return distance;
     }
+
+    private final it.unimi.dsi.fastutil.longs.Long2DoubleOpenHashMap distances = new it.unimi.dsi.fastutil.longs.Long2DoubleOpenHashMap();
 
     private void visit(TilePos pos) {
         if (!this.isRelevant(pos)) {
@@ -478,6 +647,7 @@ abstract class LodLayer {
         if (own != null) {
             // Parents hidden behind their children stay as a fallback, but are the first to go when memory runs out.
             own.lastUsedTick = Math.max(own.lastUsedTick, this.tick - 1);
+            this.keptParents.add(own);
         }
         if (!this.allowedSplits.contains(pos.pack())) {
             if (own != null && this.drawable(own)) {
@@ -514,6 +684,7 @@ abstract class LodLayer {
                 TileMesh childMesh = this.meshes.get(child.pack());
                 if (childMesh != null) {
                     childMesh.lastUsedTick = this.tick;
+                    this.keptChildren.add(childMesh);
                 } else if (!this.empty.containsKey(child.pack())) {
                     this.request(child, this.effectiveDistance(child), false);
                 }
@@ -582,6 +753,11 @@ abstract class LodLayer {
         if (room <= 0 || this.candidates.isEmpty() || !this.canSendRequests()) {
             return;
         }
+        // Between walks the candidates of the last one stay; those asked for since are left out.
+        this.candidates.removeIf(candidate -> this.pending.containsKey(candidate.key()) || this.building.contains(candidate.key()));
+        if (this.candidates.isEmpty()) {
+            return;
+        }
         this.candidates.sort(Comparator.comparingDouble(Candidate::priority));
         int missing = 0;
         while (missing < this.candidates.size() && this.candidates.get(missing).priority() < REFRESH_PRIORITY) {
@@ -627,6 +803,7 @@ abstract class LodLayer {
             this.meshes.remove(mesh.pos.pack());
             mesh.close();
             this.evicted++;
+            this.changed = true;
         }
     }
 

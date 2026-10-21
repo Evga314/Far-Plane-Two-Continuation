@@ -10,9 +10,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.zip.DeflaterOutputStream;
-import java.util.zip.InflaterInputStream;
 import net.minecraft.resources.Identifier;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Blocks of a detailed tile, built from real chunks: for every cell up to {@link #MAX_RUNS} vertical runs of solid blocks, from the
@@ -48,6 +47,8 @@ public final class DetailData {
     public final long[] missing;
     public final List<Identifier> palette;
     public final List<Identifier> blockPalette;
+    /** {@link #blockPalette} as an array, made once when first needed (by the mesh builder) instead of for every build. */
+    private Identifier @Nullable [] blockIds;
 
     public DetailData(
         byte[] runCounts, byte[] biomes, short[] tops, short[] bottoms, byte[] blocks, byte[] sides, byte[] heights, byte[] plants, long[] missing,
@@ -86,6 +87,16 @@ public final class DetailData {
         this.blockPalette = List.copyOf(blockPalette);
     }
 
+    /** The block palette as an array; the same array every time, made on first use. Read-only for callers. */
+    public Identifier[] blockIds() {
+        Identifier[] ids = this.blockIds;
+        if (ids == null) {
+            ids = this.blockPalette.toArray(Identifier[]::new);
+            this.blockIds = ids;
+        }
+        return ids;
+    }
+
     public boolean isMissing(int cell) {
         return (this.missing[cell >> 6] & 1L << (cell & 63)) != 0;
     }
@@ -102,7 +113,7 @@ public final class DetailData {
     public byte[] encode() {
         try {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream(32 * 1024);
-            try (DataOutputStream out = new DataOutputStream(new DeflaterOutputStream(bytes))) {
+            try (DataOutputStream out = new DataOutputStream(Zip.compress(bytes))) {
                 writePalette(out, this.palette);
                 writePalette(out, this.blockPalette);
                 out.write(this.runCounts);
@@ -165,7 +176,7 @@ public final class DetailData {
             throw new IOException("Detail data too large");
         }
         byte[] raw;
-        try (InputStream in = new InflaterInputStream(new ByteArrayInputStream(compressed))) {
+        try (InputStream in = Zip.decompress(new ByteArrayInputStream(compressed))) {
             raw = in.readNBytes(MAX_RAW_SIZE + 1);
         }
         if (raw.length > MAX_RAW_SIZE) {

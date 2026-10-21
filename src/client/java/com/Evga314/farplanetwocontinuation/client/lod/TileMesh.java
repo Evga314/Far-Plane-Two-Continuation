@@ -3,6 +3,7 @@ package com.Evga314.farplanetwocontinuation.client.lod;
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import net.minecraft.util.Mth;
 import org.jspecify.annotations.Nullable;
 
@@ -17,6 +18,8 @@ final class TileMesh implements AutoCloseable {
     /** Sample heights of rough tiles, kept to know how high the LOD surface is right under the camera. */
     private final short @Nullable [] heights;
     final int indexCount;
+    /** Where in the shared index list of rough tiles this tile's triangles start: floating islands have their own, see TileMeshBuilder. */
+    final int firstIndex;
     final boolean detail;
     final long bytes;
     /** Detailed tiles: one bit per 64-block square whose blocks are all known; see {@link DetailMeshBuilder#coverage}. */
@@ -64,6 +67,8 @@ final class TileMesh implements AutoCloseable {
      */
     int @Nullable [] clippedChunks;
     long lastUsedTick;
+    /** The mesh of the same tile that took this one's place, until the layer puts it where this one was drawn. */
+    @Nullable TileMesh replacedBy;
     /** Fragments closer than this horizontal distance are dropped, because detailed tiles already cover them. Set every tick. */
     float discardRadius;
     /** Fragments farther than this horizontal distance are dropped, so detailed tiles end exactly at the ring. 0 keeps everything. */
@@ -81,6 +86,7 @@ final class TileMesh implements AutoCloseable {
         this.terrainMinY = built.terrainMinY();
         this.heights = built.heights();
         this.indexCount = built.indexCount();
+        this.firstIndex = !built.detail() && built.indexCount() == TileMeshBuilder.FLOATING_INDEX_COUNT ? TileMeshBuilder.FLOATING_FIRST_INDEX : 0;
         this.detail = built.detail();
         this.bytes = built.vertices().remaining();
         this.coverage = built.coverage();
@@ -133,6 +139,16 @@ final class TileMesh implements AutoCloseable {
         double h11 = this.heights[x0 + 1 + (z0 + 1) * row];
         return (float) Mth.lerp(fz, Mth.lerp(fx, h00, h10), Mth.lerp(fx, h01, h11));
     }
+
+    /** The whole vertex buffer as a slice, made once instead of for every pass of every frame. Render thread only. */
+    GpuBufferSlice vertexSlice() {
+        if (this.vertexSlice == null) {
+            this.vertexSlice = this.vertices.slice();
+        }
+        return this.vertexSlice;
+    }
+
+    private @Nullable GpuBufferSlice vertexSlice;
 
     @Override
     public void close() {

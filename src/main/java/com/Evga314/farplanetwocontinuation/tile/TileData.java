@@ -21,6 +21,12 @@ public final class TileData {
     public static final int FLAG_LAVA = 2;
     /** Nothing at all below this sample (the void between the End islands); its height is the one of the land next to it. */
     public static final int FLAG_VOID = 4;
+    /** One of vanilla's icebergs on a frozen ocean: land of packed ice standing out of the water. */
+    public static final int FLAG_ICEBERG = 8;
+    /** With {@link #FLAG_ICEBERG}: snow on top of the iceberg. */
+    public static final int FLAG_ICEBERG_SNOW = 16;
+    /** With {@link #FLAG_ICEBERG}: an iceberg of blue ice. */
+    public static final int FLAG_BLUE_ICE = 32;
 
     public static final int MAX_PALETTE = 256;
     private static final int MAX_ID_LENGTH = 256;
@@ -39,12 +45,28 @@ public final class TileData {
     public final byte @Nullable [] subBiomes;
     /** Bit i is set when sub-sample i is under water. Present together with {@link #subBiomes}. */
     public final short @Nullable [] subWater;
+    /**
+     * How deep the water is at each sample, in blocks from the sea level down to the ground, at most 255; 0 for land and where it is
+     * not known. Coarse samples have the average of their water sub-samples. Null when the generator does not know it (the End).
+     */
+    public final byte @Nullable [] waterDepths;
 
     public TileData(short[] heights, byte[] biomes, byte[] flags, List<Identifier> palette) {
         this(heights, biomes, flags, palette, null, null);
     }
 
     public TileData(short[] heights, byte[] biomes, byte[] flags, List<Identifier> palette, byte @Nullable [] subBiomes, short @Nullable [] subWater) {
+        this(heights, biomes, flags, palette, subBiomes, subWater, null);
+    }
+
+    public TileData(
+        short[] heights, byte[] biomes, byte[] flags, List<Identifier> palette, byte @Nullable [] subBiomes, short @Nullable [] subWater,
+        byte @Nullable [] waterDepths
+    ) {
+        if (waterDepths != null && waterDepths.length != FarPlaneConstants.TILE_SAMPLE_COUNT) {
+            throw new IllegalArgumentException("Bad water depth array");
+        }
+        this.waterDepths = waterDepths;
         if (heights.length != FarPlaneConstants.TILE_SAMPLE_COUNT
             || biomes.length != FarPlaneConstants.TILE_SAMPLE_COUNT
             || flags.length != FarPlaneConstants.TILE_SAMPLE_COUNT) {
@@ -99,6 +121,10 @@ public final class TileData {
                     out.writeShort(mask);
                 }
             }
+            out.writeBoolean(this.waterDepths != null);
+            if (this.waterDepths != null) {
+                out.write(this.waterDepths);
+            }
             out.flush();
             return bytes.toByteArray();
         } catch (IOException e) {
@@ -150,11 +176,16 @@ public final class TileData {
                 subWater[i] = in.readShort();
             }
         }
+        byte[] waterDepths = null;
+        if (in.readBoolean()) {
+            waterDepths = new byte[FarPlaneConstants.TILE_SAMPLE_COUNT];
+            in.readFully(waterDepths);
+        }
         if (in.available() != 0) {
             throw new IOException("Trailing tile data");
         }
         try {
-            return new TileData(heights, biomes, flags, palette, subBiomes, subWater);
+            return new TileData(heights, biomes, flags, palette, subBiomes, subWater, waterDepths);
         } catch (IllegalArgumentException e) {
             throw new IOException(e.getMessage());
         }

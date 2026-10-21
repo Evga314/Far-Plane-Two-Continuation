@@ -4,13 +4,16 @@ import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.client.ClientConfig;
 import com.Evga314.farplanetwocontinuation.client.GpuMemory;
 import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
+import com.Evga314.farplanetwocontinuation.tile.LoadOrder;
 import com.Evga314.farplanetwocontinuation.tile.TileData;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
-import java.util.Arrays;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.core.Registry;
 import net.minecraft.util.Mth;
+import net.minecraft.util.Util;
 import net.minecraft.world.level.biome.Biome;
 import org.jspecify.annotations.Nullable;
 
@@ -30,6 +33,17 @@ final class RoughLayer extends LodLayer {
     private double doubling;
     private @Nullable DetailCoverage detailCoverage;
     private volatile boolean floating;
+    /**
+     * The samples of every tile with a mesh, kept for the margins of its neighbours (see TileMeshBuilder.grid), and which neighbours
+     * each mesh was built with. A tile built before a neighbour arrived is built again then, see {@link #rebuildStale}.
+     */
+    private final Map<Long, TileData> samples = new ConcurrentHashMap<>();
+    private final Map<Long, Integer> builtWith = new ConcurrentHashMap<>();
+    /** Tiles to build again for neighbours that arrived after them, with the time the first one did. */
+    private final Map<Long, Long> stale = new ConcurrentHashMap<>();
+    private volatile @Nullable Registry<Biome> registry;
+    private volatile int seaLevel;
+    private long lastCleanup;
 
     RoughLayer(ClientConfig config, Executor meshExecutor) {
         super("rough", meshExecutor);
@@ -71,6 +85,12 @@ final class RoughLayer extends LodLayer {
         double past = Math.max(0.0, pos.distanceTo(this.view.camX, this.view.camZ) - this.edge);
         double transitionCell = this.startCell * Math.pow(2.0, past / this.doubling);
         return cell > Math.min(transitionCell, Math.max(this.startCell, screenCell));
+    }
+
+    /** First the player's surroundings, then what is in view, like the detailed tiles (see {@link LoadOrder}); big tiles first. */
+    @Override
+    double priority(TilePos pos, double distance) {
+        return LoadOrder.score(pos, this.view.camX, this.view.camZ, this.view.lookX, this.view.lookZ) / pos.size();
     }
 
     /** Floating islands over the void (the End). */
@@ -144,7 +164,100 @@ final class RoughLayer extends LodLayer {
     @Override
     TileMeshBuilder.Built build(byte[] bytes, long key, int epoch, Registry<Biome> biomes, int seaLevel) throws Exception {
         TileData data = TileData.decode(bytes);
-        return TileMeshBuilder.build(key, epoch, data, Arrays.asList(TileMeshBuilder.resolveBiomes(biomes, data.palette)), seaLevel, this.floating);
+        this.registry = biomes;
+        this.seaLevel = seaLevel;
+        this.samples.put(key, data);
+        // Neighbours built before this tile arrived have a margin of their own edge where it is: they are built again with it.
+        TilePos pos = TilePos.unpack(key);
+        for (int d = 0; d < 9; d++) {
+            long neighbour = neighbourKey(pos, d);
+            Integer with = neighbour == key ? null : this.builtWith.get(neighbour);
+            if (with != null && (with & 1 << 8 - d) == 0) {
+                this.stale.putIfAbsent(neighbour, Util.getMillis());
+            }
+        }
+        return this.buildWithNeighbours(key, epoch, data, biomes, seaLevel);
+    }
+
+    private TileMeshBuilder.Built buildWithNeighbours(long key, int epoch, TileData data, Registry<Biome> biomes, int seaLevel) {
+        TilePos pos = TilePos.unpack(key);
+        TileData[] around = new TileData[9];
+        for (int d = 0; d < 9; d++) {
+            around[d] = d == 4 ? null : this.samples.get(neighbourKey(pos, d));
+        }
+        TileMeshBuilder.Grid grid = TileMeshBuilder.grid(data, around, biomes);
+        this.builtWith.put(key, grid.neighbours);
+        // A neighbour that arrived while its samples were being gathered may not have seen this tile's mask yet: check again.
+        for (int d = 0; d < 9; d++) {
+            if (d != 4 && (grid.neighbours & 1 << d) == 0 && around[d] == null && this.samples.containsKey(neighbourKey(pos, d))) {
+                this.stale.putIfAbsent(key, Util.getMillis());
+                break;
+            }
+        }
+        return TileMeshBuilder.build(key, epoch, grid, seaLevel, this.floating, this.config.distant().smoothing.forBuilder());
+    }
+
+    /** The key of the neighbour at {@code dx + 1 + (dz + 1) * 3} of a tile, of the same level. */
+    private static long neighbourKey(TilePos pos, int d) {
+        return new TilePos(pos.level(), pos.x() + d % 3 - 1, pos.z() + d / 3 - 1).pack();
+    }
+
+    /**
+     * Builds tiles again whose neighbours arrived after them, a little later, so a tile whose neighbours come one after another is
+     * built again once for all of them. Only while few tiles are being built, so loading new ones always comes first.
+     */
+    private void rebuildStale() {
+        Registry<Biome> biomes = this.registry;
+        if (biomes == null || this.stale.isEmpty()) {
+            return;
+        }
+        long now = Util.getMillis();
+        int started = 0;
+        for (Map.Entry<Long, Long> entry : this.stale.entrySet()) {
+            if (started >= REBUILDS_PER_TICK || this.buildingCount() >= MAX_BUILDING_FOR_REBUILDS) {
+                break;
+            }
+            long key = entry.getKey();
+            TileData data = this.samples.get(key);
+            if (data == null || !this.meshes.containsKey(key)) {
+                this.stale.remove(key);
+                continue;
+            }
+            if (now - entry.getValue() < REBUILD_DELAY_MS || this.isBuilding(key)) {
+                continue;
+            }
+            this.stale.remove(key);
+            int seaLevel = this.seaLevel;
+            this.submit(key, epoch -> this.buildWithNeighbours(key, epoch, data, biomes, seaLevel));
+            started++;
+        }
+    }
+
+    /** See {@link #rebuildStale}. */
+    private static final long REBUILD_DELAY_MS = 400L;
+    private static final int REBUILDS_PER_TICK = 6;
+    private static final int MAX_BUILDING_FOR_REBUILDS = 8;
+    /** How often samples of tiles without a mesh are let go. */
+    private static final long CLEANUP_MS = 2_000L;
+
+    @Override
+    void evict() {
+        super.evict();
+        this.rebuildStale();
+        long now = Util.getMillis();
+        if (now - this.lastCleanup >= CLEANUP_MS) {
+            this.lastCleanup = now;
+            this.samples.keySet().removeIf(key -> !this.meshes.containsKey(key) && !this.isBuilding(key));
+            this.builtWith.keySet().removeIf(key -> !this.samples.containsKey(key));
+        }
+    }
+
+    @Override
+    void reset() {
+        super.reset();
+        this.samples.clear();
+        this.builtWith.clear();
+        this.stale.clear();
     }
 
     /**

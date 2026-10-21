@@ -49,8 +49,9 @@ public class ServerConfig {
             return this.generatorThreads;
         }
         int cores = Runtime.getRuntime().availableProcessors();
-        // Phones heat up and slow down under constant load on all cores; the game's own threads need the rest.
-        return FarPlaneConstants.ANDROID ? 1 : Mth.clamp((cores - 2) / 2, 1, 6);
+        // Phones heat up and slow down under constant load on all cores. The generator threads run at the lowest priority and make
+        // room for late frames (see WorkThrottle), so on computers they may have all but the cores of the game's own threads.
+        return FarPlaneConstants.ANDROID ? 1 : Mth.clamp(cores - 3, 1, 8);
     }
 
     public int resolvedDetailThreads() {

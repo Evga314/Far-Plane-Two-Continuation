@@ -3,6 +3,7 @@ package com.Evga314.farplanetwocontinuation.server;
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.tile.TileData;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
+import com.Evga314.farplanetwocontinuation.tile.Zip;
 import com.mojang.logging.LogUtils;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -20,7 +21,6 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Locale;
 import java.util.zip.DeflaterOutputStream;
-import java.util.zip.InflaterInputStream;
 import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -32,7 +32,7 @@ import org.slf4j.Logger;
 public final class TileDiskCache {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAGIC = 0x46503243;
-    private static final int FORMAT = 7;
+    static final int FORMAT = 14;
     private static final long MAX_FILE_SIZE = TileData.MAX_ENCODED_SIZE;
 
     private final Path root;
@@ -61,6 +61,12 @@ public final class TileDiskCache {
         return result.toString();
     }
 
+    /** Whether a tile is cached, without reading it. */
+    public boolean has(Identifier dimension, TilePos pos) {
+        Path file = this.file(dimension, pos);
+        return file != null && Files.isRegularFile(file);
+    }
+
     /** A cached tile in its encoded form, checked to decode; null when there is none or it is damaged. */
     public byte @Nullable [] read(Identifier dimension, TilePos pos) {
         Path file = this.file(dimension, pos);
@@ -76,7 +82,7 @@ public final class TileDiskCache {
             if (in.readInt() != MAGIC || in.readInt() != FORMAT || in.readLong() != this.seed) {
                 return null;
             }
-            try (InputStream body = new InflaterInputStream(in)) {
+            try (InputStream body = Zip.decompress(in)) {
                 byte[] data = body.readNBytes(TileData.MAX_ENCODED_SIZE + 1);
                 TileData.decode(data);
                 return data;
@@ -89,8 +95,64 @@ public final class TileDiskCache {
 
     /** Deletes every cached tile of one dimension of this world. */
     public void clear(Identifier dimension) {
+        this.createdDirectories.clear();
         deleteTree(this.root.resolve(sanitize(dimension.getNamespace() + "_" + dimension.getPath())).normalize(), this.root);
     }
+
+    /**
+     * Clears the caches of the mod in a world made by another version of their files, on the first start with this one, so everything
+     * is made again the new way at once instead of region by region as old files turn up. The tiles of the distant terrain and the
+     * chunks made for detailed terrain have versions of their own, and only the outdated one is cleared: the chunks take long to make
+     * again. A small file in the cache directory says which versions made it.
+     */
+    static void clearIfOutdated(Path worldRoot) {
+        Path root = worldRoot.toAbsolutePath().normalize().resolve(FarPlaneConstants.MOD_ID).normalize();
+        Path virtual = root.resolve(VIRTUAL_DIRECTORY).normalize();
+        Path marker = root.resolve(VERSION_FILE);
+        String tiles = "tiles " + FORMAT;
+        String chunks = "virtual chunks " + VirtualChunkStore.FORMAT;
+        String version = tiles + ", " + chunks;
+        String old = "";
+        try {
+            if (Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS)) {
+                old = Files.readString(marker).trim();
+            }
+        } catch (IOException e) {
+            LOGGER.debug("Could not read the cache version", e);
+        }
+        if (old.equals(version)) {
+            return;
+        }
+        if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+            if (!(old + ",").contains(tiles + ",")) {
+                LOGGER.info("Distant terrain tiles were cached by another version, clearing them");
+                try (java.util.stream.Stream<Path> children = Files.list(root)) {
+                    for (Path child : children.toList()) {
+                        if (!child.normalize().equals(virtual)) {
+                            deleteTree(child.normalize(), root);
+                        }
+                    }
+                } catch (IOException e) {
+                    LOGGER.warn("Failed to clear the LOD tile cache", e);
+                }
+            }
+            if (!old.endsWith(chunks)) {
+                LOGGER.info("Chunks for detailed terrain were made by another version, clearing them");
+                deleteTree(virtual, root);
+            }
+        }
+        try {
+            Files.createDirectories(root);
+            Files.writeString(marker, version);
+        } catch (IOException e) {
+            LOGGER.warn("Could not write the cache version", e);
+        }
+    }
+
+    /** Where VirtualChunkStore keeps its files, inside the cache directory. */
+    private static final String VIRTUAL_DIRECTORY = "virtual";
+
+    private static final String VERSION_FILE = "cache-version.txt";
 
     /**
      * Deletes a directory with everything in it. Only regular files and directories inside {@code root} are removed; symbolic links
@@ -132,6 +194,9 @@ public final class TileDiskCache {
         }
     }
 
+    /** Directories made by {@link #write}, so each is made once instead of for every tile; forgotten when the cache is cleared. */
+    private final java.util.Set<Path> createdDirectories = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     public void write(Identifier dimension, TilePos pos, byte[] encoded) {
         Path file = this.file(dimension, pos);
         if (file == null) {
@@ -144,12 +209,22 @@ public final class TileDiskCache {
             out.writeInt(FORMAT);
             out.writeLong(this.seed);
             out.flush();
-            try (DeflaterOutputStream body = new DeflaterOutputStream(bytes)) {
+            try (DeflaterOutputStream body = Zip.compress(bytes)) {
                 body.write(encoded);
             }
-            Files.createDirectories(file.getParent());
+            Path directory = file.getParent();
+            if (!this.createdDirectories.contains(directory)) {
+                Files.createDirectories(directory);
+                this.createdDirectories.add(directory);
+            }
             Path temp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.write(temp, bytes.toByteArray());
+            try {
+                Files.write(temp, bytes.toByteArray());
+            } catch (java.nio.file.NoSuchFileException e) {
+                // The directory went away meanwhile (the cache was cleared): made again once.
+                Files.createDirectories(directory);
+                Files.write(temp, bytes.toByteArray());
+            }
             try {
                 Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             } catch (AtomicMoveNotSupportedException e) {

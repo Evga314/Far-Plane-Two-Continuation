@@ -143,6 +143,23 @@ final class EndTileGenerator {
         private static final int COARSE_REACH = 8;
 
         private final SimplexNoise noise;
+
+        /** Vanilla's island noise of a world: the same for every tile, and only read once made, so it is shared by all threads. */
+        private static volatile @Nullable SeededNoise shared;
+
+        private record SeededNoise(long seed, SimplexNoise noise) {
+        }
+
+        private static SimplexNoise noise(long seed) {
+            SeededNoise current = shared;
+            if (current == null || current.seed() != seed) {
+                LegacyRandomSource random = new LegacyRandomSource(seed);
+                random.consumeCount(17292);
+                current = new SeededNoise(seed, new SimplexNoise(random, true));
+                shared = current;
+            }
+            return current.noise();
+        }
         private final byte @Nullable [] sizes;
         private final int minCellX;
         private final int minCellZ;
@@ -151,9 +168,7 @@ final class EndTileGenerator {
         private final int reach;
 
         IslandShape(long seed, long minX, long minZ, long maxX, long maxZ) {
-            LegacyRandomSource random = new LegacyRandomSource(seed);
-            random.consumeCount(17292);
-            this.noise = new SimplexNoise(random, true);
+            this.noise = noise(seed);
             this.minCellX = cell(TileGenerator.clampToWorld(minX)) - REACH;
             this.minCellZ = cell(TileGenerator.clampToWorld(minZ)) - REACH;
             this.width = cell(TileGenerator.clampToWorld(maxX)) + REACH - this.minCellX + 1;

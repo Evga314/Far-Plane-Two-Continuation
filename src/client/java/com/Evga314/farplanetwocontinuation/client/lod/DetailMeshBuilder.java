@@ -8,9 +8,7 @@ import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.Holder;
 import net.minecraft.resources.Identifier;
@@ -54,6 +52,8 @@ final class DetailMeshBuilder {
     private static final int CUTOUT = 4;
     /** Translucent water, drawn in a pass of its own after everything else. */
     private static final int TRANSLUCENT_WATER = 8;
+    /** Translucent water under other blocks of its column (a pocket in a wreck or under a ledge), see LodRenderer.DETAIL_UNDER_WATER_PIPELINE. */
+    private static final int WATER_POCKET = 16;
     /**
      * Next to cells without data the rough terrain is shown, a little lower than the blocks. A short wall closes that step without
      * dropping a tall cliff into the rough terrain.
@@ -113,8 +113,10 @@ final class DetailMeshBuilder {
         boolean[] columnCaps = new boolean[slots];
         float[] topHeights = new float[slots];
         int[] plantPaints = new int[DetailData.CELL_COUNT];
-        Identifier[] blockIds = data.blockPalette.toArray(Identifier[]::new);
+        Identifier[] blockIds = data.blockIds();
         boolean hasWater = false;
+        // Where the colors of the cell being built are blended from, see BlockLooks.Blend.
+        BlockLooks.Blend around = new BlockLooks.Blend();
 
         float minY = Float.MAX_VALUE;
         float maxY = -Float.MAX_VALUE;
@@ -123,6 +125,7 @@ final class DetailMeshBuilder {
                 int index = cx + cz * CELLS;
                 plantPaints[index] = -1;
                 Holder<Biome> biome = biomes.get(data.biomes[index] & 0xFF);
+                blend(around, data, biomes, biome, baseX, baseZ, cx, cz, cell);
                 int worldX = (int) Mth.clamp(baseX + (long) cx * cell, -FarPlaneConstants.WORLD_LIMIT, FarPlaneConstants.WORLD_LIMIT);
                 int worldZ = (int) Mth.clamp(baseZ + (long) cz * cell, -FarPlaneConstants.WORLD_LIMIT, FarPlaneConstants.WORLD_LIMIT);
                 for (int run = 0; run < data.runCounts[index]; run++) {
@@ -132,25 +135,25 @@ final class DetailMeshBuilder {
                     BlockLooks.Look top = BlockLooks.get(topId);
                     BlockLooks.Look side = BlockLooks.get(blockIds[data.sides[slot] & 0xFF]);
                     boolean water = top.fluid() && topId.equals(WATER);
-                    topPaints[slot] = paints.index(paint(top.top(), top.state(), water, detail, biome, worldX, topY, worldZ));
-                    edgePaints[slot] = paints.index(paint(top.side(), top.state(), water, detail, biome, worldX, topY, worldZ));
+                    topPaints[slot] = paints.index(paint(top.top(), top.state(), water, detail, biome, worldX, topY, worldZ, around));
+                    edgePaints[slot] = paints.index(paint(top.side(), top.state(), water, detail, biome, worldX, topY, worldZ, around));
                     if (!detail.thinBlocks() && data.heights[slot] < 16) {
                         // A thin block on top drawn as a full block: only its top shows it, the sides show what it lies on.
                         edgePaints[slot] = -1;
                     }
                     boolean sideWater = side.fluid() && blockIds[data.sides[slot] & 0xFF].equals(WATER);
-                    sidePaints[slot] = paints.index(paint(side.side(), side.state(), sideWater, detail, biome, worldX, topY - 1, worldZ));
+                    sidePaints[slot] = paints.index(paint(side.side(), side.state(), sideWater, detail, biome, worldX, topY - 1, worldZ, around));
                     if (edgePaints[slot] < 0) {
                         edgePaints[slot] = sidePaints[slot];
                     }
                     // A thin block with gaps on top (leaf litter) shows the top of the block it lies on through them.
                     underPaints[slot] = data.heights[slot] < 16 && top.top().cutout()
-                        ? paints.index(paint(side.top(), side.state(), sideWater, detail, biome, worldX, topY - 1, worldZ))
+                        ? paints.index(paint(side.top(), side.state(), sideWater, detail, biome, worldX, topY - 1, worldZ, around))
                         : -1;
                     BlockLooks.Look stalk = side.columnWidth() > 0.0F ? side : top.columnWidth() > 0.0F ? top : null;
                     if (stalk != null) {
                         columnWidths[slot] = stalk.columnWidth();
-                        Paint stalkSide = paint(stalk.side(), stalk.state(), false, detail, biome, worldX, topY, worldZ);
+                        Paint stalkSide = paint(stalk.side(), stalk.state(), false, detail, biome, worldX, topY, worldZ, around);
                         // On single-block cells the stalk texture is moved so its middle is in the middle of the column; on coarser cells
                         // the column is not where the texture repeats, so it gets the stalk's color.
                         columnSides[slot] = paints.index(cell == 1 && stalkSide.sprite() != null
@@ -161,14 +164,16 @@ final class DetailMeshBuilder {
                         columnCaps[slot] = stalk == side && top.columnWidth() <= 0.0F && data.tops[slot] - 1 > data.bottoms[slot];
                     }
                     hasWater |= water && detail.translucentWater();
-                    topHeights[slot] = detail.thinBlocks() ? data.tops[slot] - 1 + data.heights[slot] / 16.0F : data.tops[slot];
+                    // Vanilla draws the top of water a ninth of a block under the block's top; here too, so the two meet level.
+                    topHeights[slot] = water ? data.tops[slot] - WATER_DIP
+                        : detail.thinBlocks() ? data.tops[slot] - 1 + data.heights[slot] / 16.0F : data.tops[slot];
                     minY = Math.min(minY, data.bottoms[slot]);
                     maxY = Math.max(maxY, data.tops[slot] + (run == 0 && detail.plants() ? 1 : 0));
                 }
                 int plant = data.plants[index] & 0xFF;
                 if (detail.plants() && cell == 1 && plant != DetailData.NO_PLANT && data.runCounts[index] > 0 && plant - 1 < blockIds.length) {
                     BlockLooks.Look look = BlockLooks.get(blockIds[plant - 1]);
-                    Paint paint = paint(look.plant(), look.state(), false, detail, biome, worldX, data.tops[index * RUNS], worldZ);
+                    Paint paint = paint(look.plant(), look.state(), false, detail, biome, worldX, data.tops[index * RUNS], worldZ, around);
                     plantPaints[index] = paints.index(new Paint(paint.color(), paint.sprite(), true));
                 }
             }
@@ -183,7 +188,7 @@ final class DetailMeshBuilder {
         // Plants come last in every chunk, so far chunks can be drawn without them.
         boolean plants = detail.plants() && cell == 1;
         BlockLooks.Look stone = BlockLooks.get(STONE);
-        int floorPaint = paints.index(paint(stone.top(), stone.state(), false, detail, null, 0, 0, 0));
+        int floorPaint = paints.index(paint(stone.top(), stone.state(), false, detail, null, 0, 0, 0, null));
         Cells cells = new Cells(
             data, paints, topPaints, edgePaints, sidePaints, underPaints, columnWidths, columnSides, columnTops, columnCaps, topHeights, plantPaints,
             floorPaint, cell, baseX, baseZ, detail
@@ -238,23 +243,83 @@ final class DetailMeshBuilder {
     /**
      * The paint of one face of a block at a place. Flat faces get the average color of the texture with the biome tint; textured
      * faces only the tint. Water stays in the flat color of the rough terrain's water at every level, so the two match where they meet.
+     * The colors are evened out over the biomes around the place ({@code around}, the biomes of the cells around this one, null
+     * where a place has no neighbours), the way vanilla blends biome colors, so they do not change in steps at biome borders.
      */
     private static Paint paint(
-        BlockLooks.Face face, BlockState state, boolean water, BlockDetail detail, @Nullable Holder<Biome> biome, int x, int y, int z
+        BlockLooks.Face face, BlockState state, boolean water, BlockDetail detail, @Nullable Holder<Biome> biome, int x, int y, int z,
+        BlockLooks.@Nullable Blend around
     ) {
         boolean textured = detail.textured();
         if (water && detail.translucentWater() && face.sprite() != null) {
-            int tint = biome == null ? 0xFF3F76E4 : ARGB.opaque(biome.value().getWaterColor());
+            int tint = around == null
+                ? biome == null ? 0xFF3F76E4 : ARGB.opaque(biome.value().getWaterColor())
+                : blendedWaterColor(around, biome, true);
             return new Paint(tint, face.sprite(), false, true);
         }
         if (water) {
-            int color = ARGB.scaleRGB(TileColors.waterColor(biome), TileMeshBuilder.WATER_SHADE);
+            int color = ARGB.scaleRGB(around == null ? TileColors.waterColor(biome) : blendedWaterColor(around, biome, false), TileMeshBuilder.WATER_SHADE);
             return new Paint(color, null, false);
         }
         if (!textured || face.sprite() == null) {
-            return new Paint(ARGB.opaque(face.color(state, biome, x, y, z)), null, false);
+            return new Paint(ARGB.opaque(around == null ? face.color(state, biome, x, y, z) : face.colorBlended(state, around, y)), null, false);
         }
-        return new Paint(face.tintColor(state, biome, x, y, z), face.sprite(), face.cutout() && detail.cutout());
+        return new Paint(around == null ? face.tintColor(state, biome, x, y, z) : face.tintColorBlended(state, around, y), face.sprite(), face.cutout() && detail.cutout());
+    }
+
+    /** The color of water at a place, blended between the biomes around it like every other color, see BlockLooks.Blend. */
+    private static int blendedWaterColor(BlockLooks.Blend around, @Nullable Holder<Biome> biome, boolean translucent) {
+        float red = 0.0F;
+        float green = 0.0F;
+        float blue = 0.0F;
+        for (int i = 0; i < 4; i++) {
+            float weight = around.weights[i];
+            if (weight <= 0.0F) {
+                continue;
+            }
+            Holder<Biome> near = around.biomes[i] != null ? around.biomes[i] : biome;
+            int color = translucent
+                ? near == null ? 0xFF3F76E4 : ARGB.opaque(near.value().getWaterColor())
+                : TileColors.waterColor(near);
+            red += weight * ARGB.red(color);
+            green += weight * ARGB.green(color);
+            blue += weight * ARGB.blue(color);
+        }
+        return ARGB.color(255, Math.round(red), Math.round(green), Math.round(blue));
+    }
+
+    /**
+     * Fills where the colors of a cell are blended from: the middles of the four 4-block biome squares around the middle of the cell,
+     * weighted by how close they are. A square outside the tile or without data lends its place to the cell's own biome, so the
+     * blend weakens at the edge of a tile instead of stepping.
+     */
+    private static void blend(
+        BlockLooks.Blend blend, DetailData data, List<@Nullable Holder<Biome>> biomes, @Nullable Holder<Biome> own, long baseX, long baseZ, int cx, int cz,
+        int cell
+    ) {
+        // Square middles lie 4q + 2 blocks from the corner of the tile; tiles start on whole squares.
+        float fx = (cx * cell + cell * 0.5F - 2.0F) * 0.25F;
+        float fz = (cz * cell + cell * 0.5F - 2.0F) * 0.25F;
+        int qx = Mth.floor(fx);
+        int qz = Mth.floor(fz);
+        float tx = fx - qx;
+        float tz = fz - qz;
+        int span = CELLS * cell;
+        for (int i = 0; i < 4; i++) {
+            int blockX = (qx + (i & 1)) * 4 + 2;
+            int blockZ = (qz + (i >> 1)) * 4 + 2;
+            Holder<Biome> biome = own;
+            if (blockX >= 0 && blockZ >= 0 && blockX < span && blockZ < span) {
+                int index = blockX / cell + blockZ / cell * CELLS;
+                if (!data.isMissing(index)) {
+                    biome = biomes.get(data.biomes[index] & 0xFF);
+                }
+            }
+            blend.biomes[i] = biome;
+            blend.xs[i] = (int) Mth.clamp(baseX + blockX, -FarPlaneConstants.WORLD_LIMIT, FarPlaneConstants.WORLD_LIMIT);
+            blend.zs[i] = (int) Mth.clamp(baseZ + blockZ, -FarPlaneConstants.WORLD_LIMIT, FarPlaneConstants.WORLD_LIMIT);
+            blend.weights[i] = ((i & 1) == 0 ? 1.0F - tx : tx) * ((i >> 1) == 0 ? 1.0F - tz : tz);
+        }
     }
 
     /**
@@ -313,7 +378,7 @@ final class DetailMeshBuilder {
             int nx = cx + DIRECTION_X[direction];
             int nz = cz + DIRECTION_Z[direction];
             if (nx < 0 || nz < 0 || nx >= CELLS || nz >= CELLS || data.isMissing(nx + nz * CELLS)) {
-                lowest = Math.min(lowest, top - UNKNOWN_WALL);
+                lowest = Math.min(lowest, data.bottoms[(cx + cz * CELLS) * RUNS]);
                 continue;
             }
             int neighbour = nx + nz * CELLS;
@@ -404,6 +469,11 @@ final class DetailMeshBuilder {
                 int slot = index * RUNS + run;
                 float top = this.topHeights[slot];
                 int bottom = data.bottoms[slot];
+                // Under the sea everything gets darker with depth like vanilla's, each block taking one level of the sky's light: the
+                // ground under the water, and what lies under a ledge or a pocket of it too, measured from the surface of the column.
+                out.waterTop = this.paints.get(this.topPaints[index * RUNS]).water() ? data.tops[index * RUNS] : NO_WATER;
+                out.lightWaterTop = this.lightWaterTop(index);
+                out.pocket = run > 0;
                 if (this.columnWidths[slot] > 0.0F) {
                     float centerX = (x0 + x1) * 0.5F;
                     float centerZ = (z0 + z1) * 0.5F;
@@ -430,7 +500,11 @@ final class DetailMeshBuilder {
                 boolean underClearWater = run > 0 && this.paints.get(this.topPaints[slot - 1]).water();
                 int borderBottom = underClearWater ? Math.max(bottom, data.tops[slot] - UNKNOWN_WALL) : bottom;
                 Paint topPaint = this.paints.get(this.topPaints[slot]);
-                if (run > 0) {
+                // Water right under water (a pocket under a waterlogged trapdoor joined with the water over it) has no surface, as in
+                // vanilla.
+                boolean underWater = run > 0 && topPaint.water() && this.paints.get(this.topPaints[slot - 1]).water()
+                    && data.bottoms[slot - 1] == data.tops[slot];
+                if (run > 0 && !underWater) {
                     out.quad(x0, top, z0, x0, top, z1, x1, top, z1, x1, top, z0, topPaint, SHADE_TOP, KIND_HORIZONTAL);
                 }
                 if (topPaint.cutout() && top - INNER_LAYER > bottom) {
@@ -443,9 +517,12 @@ final class DetailMeshBuilder {
                     float under = data.tops[slot] - 1;
                     out.quad(x0, under, z0, x0, under, z1, x1, under, z1, x1, under, z0, this.paints.get(this.underPaints[slot]), SHADE_TOP, KIND_HORIZONTAL);
                 }
-                boolean grounded = run + 1 < runs && data.tops[slot + 1] == bottom && !this.paints.get(this.topPaints[slot + 1]).water();
-                if (clearWater && !grounded) {
-                    // Chunks not fully generated may have nothing under their water; a floor there keeps the sky from showing through.
+                // Whatever lies right under the water closes it, more water too.
+                boolean grounded = run + 1 < runs && data.tops[slot + 1] == bottom;
+                if (clearWater && !grounded && run + 1 < runs) {
+                    // Water over a gap closes it with a floor. Where nothing is known under the water (chunks not fully generated) there
+                    // is none: the rough water drawn under the detailed tiles shows there instead (see LodRenderer.UNDER_DETAIL_PIPELINE),
+                    // as a stone floor would stand out grey through the water.
                     out.quad(x0, bottom, z0, x0, bottom, z1, x1, bottom, z1, x1, bottom, z0, this.paints.get(this.floorPaint), SHADE_TOP, KIND_HORIZONTAL);
                 }
                 if (run + 1 < runs && bottom > data.tops[slot + 1]) {
@@ -468,13 +545,25 @@ final class DetailMeshBuilder {
                         // The neighbouring tile may be of another detail level, may not be drawn at all, or may be vanilla terrain, so its
                         // blocks cannot be relied on: border walls are always complete. Next to a drawn neighbour they stay hidden under it.
                         // The same holds for chunk borders of coarse tiles, see above.
-                        wall(out, direction, x0, x1, z0, z1, borderBottom, top, runTop, edge, side);
+                        // At the edge of the tile the ground next door is not known at all and may lie far lower, as on the slope of
+                        // a deep trench: a short step would leave a gap that the bottom of the world shows through. The wall goes down
+                        // to the end of the run; that deep under the water it is as dark as the ground around it.
+                        int wallBottom = outside ? bottom : borderBottom;
+                        if (underClearWater && !outside && !data.isMissing(nx + nz * CELLS)) {
+                            // Under clear water the wall is seen through it: inside the tile the ground next door is known, and vanilla's
+                            // real columns there lie at most a cell lower than its highest one, so the wall ends there.
+                            wallBottom = Math.max(wallBottom, this.groundUnderWater(nx + nz * CELLS) - (this.cell - 1));
+                        }
+                        if (wallBottom < top) {
+                            wall(out, direction, x0, x1, z0, z1, wallBottom, top, runTop, edge, side);
+                        }
                         continue;
                     }
                     int neighbour = nx + nz * CELLS;
                     if (data.isMissing(neighbour)) {
-                        // Without data next door only a short step down to the rough terrain is closed.
-                        wall(out, direction, x0, x1, z0, z1, Math.max(bottom, data.tops[index * RUNS] - UNKNOWN_WALL), top, runTop, edge, side);
+                        // Without data next door the wall goes down to the end of the run, as at the edge of the tile: under
+                        // clear water a short step leaves the same gap at a deep trench, with the rough terrain far below it.
+                        wall(out, direction, x0, x1, z0, z1, bottom, top, runTop, edge, side);
                         continue;
                     }
                     // The side of this run minus everything the neighbour covers. Below its lowest run the neighbour counts as solid.
@@ -491,6 +580,11 @@ final class DetailMeshBuilder {
                         if (neighbourTop < open) {
                             wall(out, direction, x0, x1, z0, z1, Math.max(bottom, neighbourTop), open, runTop, edge, side);
                         }
+                        if (clearWater && n == 0 && this.paints.get(this.topPaints[neighbourBase]).water()) {
+                            // Water next to the open water of the next column has no side under its surface, as in vanilla: the runs
+                            // of a column end on whole blocks, so a slab or stairs there would leave a thin step of water as a sheet.
+                            break;
+                        }
                         open = Math.min(open, data.bottoms[neighbourBase + n]);
                     }
                     if (neighbourRuns == 0) {
@@ -498,6 +592,31 @@ final class DetailMeshBuilder {
                     }
                 }
             }
+            out.waterTop = NO_WATER;
+            out.lightWaterTop = NO_WATER;
+            out.pocket = false;
+        }
+
+        /** Top of the highest run of a cell that is neither water nor a stalk: the ground, under the water if there is any. */
+        private int groundUnderWater(int index) {
+            int base = index * RUNS;
+            for (int n = 0; n < this.data.runCounts[index]; n++) {
+                if (this.columnWidths[base + n] == 0.0F && !this.paints.get(this.topPaints[base + n]).water()) {
+                    return this.data.tops[base + n];
+                }
+            }
+            return Integer.MIN_VALUE / 2;
+        }
+
+        /** Top of the first water of a column, under whatever lies on top of it; NO_WATER when the column has no water. */
+        private int lightWaterTop(int index) {
+            int base = index * RUNS;
+            for (int n = 0; n < this.data.runCounts[index]; n++) {
+                if (this.paints.get(this.topPaints[base + n]).water()) {
+                    return this.data.tops[base + n];
+                }
+            }
+            return NO_WATER;
         }
 
         /** The plant on the ground of a cell as two crossed planes, seen from both sides, the way vanilla draws grass and flowers. */
@@ -617,11 +736,15 @@ final class DetailMeshBuilder {
     /** The different paints of one tile, so equal neighbouring faces can be found by comparing numbers. */
     private static final class Paints {
         private final List<Paint> list = new ArrayList<>();
-        private final Map<Paint, Integer> indices = new HashMap<>();
+        private final it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Paint> indices = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<>();
+
+        Paints() {
+            this.indices.defaultReturnValue(-1);
+        }
 
         int index(Paint paint) {
-            Integer index = this.indices.get(paint);
-            if (index == null) {
+            int index = this.indices.getInt(paint);
+            if (index < 0) {
                 index = this.list.size();
                 this.list.add(paint);
                 this.indices.put(paint, index);
@@ -638,6 +761,32 @@ final class DetailMeshBuilder {
      * Growable vertex buffer, four vertices per quad. Flat colors: position and color. Textured: position, color, the corner of the
      * sprite in the atlas and its size in texels; the shader repeats the sprite over every block of a face.
      */
+    /**
+     * How bright ground lies under this many blocks of water, as vanilla draws it with the default brightness setting: the sky's light
+     * loses a level per block of water, and vanilla's light curve turns the level into brightness. Never quite black, like vanilla's
+     * darkest light.
+     */
+    static float underwaterLight(int depth) {
+        float level = Math.clamp(15 - depth, 0, 15) / 15.0F;
+        float curve = level / (4.0F - 3.0F * level);
+        float lifted = 1.0F - (1.0F - curve) * (1.0F - curve) * (1.0F - curve) * (1.0F - curve);
+        float brightness = (curve + lifted) * 0.5F;
+        return DARKEST_LIGHT + (1.0F - DARKEST_LIGHT) * brightness;
+    }
+
+    private static final float DARKEST_LIGHT = 0.05F;
+    /** How far under the top of its block vanilla draws the surface of water with nothing over it. */
+    private static final float WATER_DIP = 1.0F / 9.0F;
+    /** {@link #underwaterLight} for every depth until it stops changing. */
+    private static final float[] UNDERWATER_LIGHT = new float[16];
+    private static final int NO_WATER = Integer.MIN_VALUE;
+
+    static {
+        for (int depth = 0; depth < UNDERWATER_LIGHT.length; depth++) {
+            UNDERWATER_LIGHT[depth] = underwaterLight(depth);
+        }
+    }
+
     private static final class QuadWriter {
         private final boolean textured;
         private final int vertexSize;
@@ -651,6 +800,19 @@ final class DetailMeshBuilder {
         /** Quads of {@link TileMesh#GROUP_OTHER} before the plants of each chunk. */
         private int[] plantStarts = new int[1];
         int quads;
+        /**
+         * Top of the water over the next quads, {@link #NO_WATER} without: each corner gets the light of the water at its height, see
+         * underwaterLight, so a tall pillar under water darkens downwards like vanilla's instead of taking the light of its top.
+         */
+        int waterTop = NO_WATER;
+        /**
+         * Top of the first water of the column for the light under it, also under a cover that is not water, like the ice over a
+         * frozen sea: {@link #lit} measures the depth from it. The pocket flag and the surface of the water keep following
+         * {@link #waterTop}, so covered water is not reclassified.
+         */
+        int lightWaterTop = NO_WATER;
+        /** The next quads are of a run under the top one: its water is a pocket under something else, not the surface. */
+        boolean pocket;
         /** Some face has a texture with gaps. */
         boolean cutout;
 
@@ -674,6 +836,12 @@ final class DetailMeshBuilder {
                 group.clear();
             }
             this.buffer = this.buffers[0];
+        }
+
+        /** The color of a corner at a height under the water, see {@link #waterTop}. */
+        private int lit(Paint paint, float shade, float y) {
+            int depth = Math.clamp(this.lightWaterTop - (int) Math.floor(y), 0, UNDERWATER_LIGHT.length - 1);
+            return ARGB.scaleRGB(paint.color(), shade * UNDERWATER_LIGHT[depth]);
         }
 
         void chunks(int count) {
@@ -731,13 +899,24 @@ final class DetailMeshBuilder {
                 this.buffers[group] = bigger;
             }
             this.counts[group]++;
-            int color = ARGB.scaleRGB(paint.color(), shade);
-            int alpha = 255 - (kind | (paint.cutout() ? CUTOUT : 0) | (paint.water() ? TRANSLUCENT_WATER : 0));
+            // Water lower down a column with water on top is a pocket under something else.
+            boolean surface = paint.water() && !this.pocket;
+            int water = !paint.water() ? 0 : this.waterTop == NO_WATER || surface ? TRANSLUCENT_WATER : TRANSLUCENT_WATER | WATER_POCKET;
+            int alpha = 255 - (kind | (paint.cutout() ? CUTOUT : 0) | water);
             this.cutout |= paint.cutout();
-            this.vertex(ax, ay, az, color, alpha, paint);
-            this.vertex(bx, by, bz, color, alpha, paint);
-            this.vertex(cx, cy, cz, color, alpha, paint);
-            this.vertex(dx, dy, dz, color, alpha, paint);
+            // Blocks and pockets get darker under the water; the surface water keeps its color.
+            if (this.lightWaterTop == NO_WATER || surface) {
+                int color = ARGB.scaleRGB(paint.color(), shade);
+                this.vertex(ax, ay, az, color, alpha, paint);
+                this.vertex(bx, by, bz, color, alpha, paint);
+                this.vertex(cx, cy, cz, color, alpha, paint);
+                this.vertex(dx, dy, dz, color, alpha, paint);
+            } else {
+                this.vertex(ax, ay, az, this.lit(paint, shade, ay), alpha, paint);
+                this.vertex(bx, by, bz, this.lit(paint, shade, by), alpha, paint);
+                this.vertex(cx, cy, cz, this.lit(paint, shade, cy), alpha, paint);
+                this.vertex(dx, dy, dz, this.lit(paint, shade, dy), alpha, paint);
+            }
             this.quads++;
         }
 

@@ -49,6 +49,7 @@ public class LodConfigScreen extends OptionsSubScreen {
         this.list.addBig(Button.builder(Component.translatable(PREFIX + "detail_settings"), button -> this.open(new DimensionChoiceScreen(
             this, Component.translatable(PREFIX + "detailed.title"), DetailConfigScreen::new
         ))).build());
+        this.list.addBig(Button.builder(Component.translatable(PREFIX + "other_settings"), button -> this.open(new OtherConfigScreen(this))).build());
         this.list.addBig(Button.builder(Component.translatable(PREFIX + "clear_cache"), button -> this.confirmClearCache()).build());
     }
 

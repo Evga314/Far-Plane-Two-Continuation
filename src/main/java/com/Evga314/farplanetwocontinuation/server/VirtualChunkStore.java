@@ -2,6 +2,7 @@ package com.Evga314.farplanetwocontinuation.server;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain;
+import com.Evga314.farplanetwocontinuation.tile.Zip;
 import com.mojang.logging.LogUtils;
 import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
@@ -26,8 +27,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.zip.DeflaterOutputStream;
-import java.util.zip.InflaterInputStream;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -50,7 +49,7 @@ import org.slf4j.Logger;
 final class VirtualChunkStore {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAGIC = 0x46505643;
-    private static final int FORMAT = 15;
+    static final int FORMAT = 20;
     private static final int REGION = VirtualTerrain.REGION;
     /**
      * About 2 MB per region in memory, one region per 256 MB of heap (16 with 4 GB): enough for the regions around a player with a
@@ -271,7 +270,7 @@ final class VirtualChunkStore {
             if (header.readInt() != MAGIC || header.readInt() != FORMAT || header.readLong() != this.seed) {
                 return null;
             }
-            try (InputStream body = new InflaterInputStream(header)) {
+            try (InputStream body = Zip.decompress(header)) {
                 DataInputStream in = new DataInputStream(body);
                 Registry<Biome> biomes = level.registryAccess().lookupOrThrow(Registries.BIOME);
                 int paletteSize = in.readUnsignedShort();
@@ -354,7 +353,7 @@ final class VirtualChunkStore {
             header.writeInt(FORMAT);
             header.writeLong(this.seed);
             header.flush();
-            try (DataOutputStream out = new DataOutputStream(new DeflaterOutputStream(bytes))) {
+            try (DataOutputStream out = new DataOutputStream(Zip.compress(bytes))) {
                 out.writeShort(ordered.size());
                 for (Holder<Biome> biome : ordered) {
                     byte[] text = biome.unwrapKey().orElseThrow().identifier().toString().getBytes(StandardCharsets.UTF_8);

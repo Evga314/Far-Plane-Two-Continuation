@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.Evga314.farplanetwocontinuation.mixin.common",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "ChunkGeneratorAccess",
+    "LevelChunkMixin",
+    "MaterialSystemMixin",
+    "NoiseBasedChunkGeneratorAccess",
+    "StructurePaletteMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

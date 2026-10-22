@@ -218,10 +218,6 @@ CPU frequencies, temperatures, the parts of the client tick and of tile generati
 finding the cause of stutters on a device. In it, parts of the distant terrain can be turned off or marked in color by creating
 files named `farplane-debug-...` in `config/` while the game runs.
 
-## Who made this mod
-
-The idea to make a continuation of FarPlaneTwo is fully mine (Evga314). But my Java knowledge and experience are bad now. So, I use AI (Claude Opus 5.5) to write the code.
-
 ## Credits
 
 This mod is a continuation of the idea of **FarPlaneTwo** by **DaPorkchop_**:

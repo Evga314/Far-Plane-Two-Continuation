@@ -42,6 +42,9 @@ import org.jspecify.annotations.Nullable;
 public final class ChunkSummary {
     /** How far below the surface runs are looked for. Deeper caves are never visible from far away. */
     static final int SCAN_DEPTH = 96;
+    /** Most segments one column may hold in this pass; profiles will tune it later. */
+    private static final int SEGMENT_CAP = 64;
+
     private static final byte NOT_SCANNED = -1;
     private static final int RUNS = DetailData.MAX_RUNS;
     /**
@@ -84,16 +87,24 @@ public final class ChunkSummary {
 
     /** What a block state means for the summary, worked out once per state. */
     private static final Map<BlockState, Look> LOOKS = new ConcurrentHashMap<>();
+    /** How many segments each column has; NOT_SCANNED until the column is scanned. */
+    private final byte[] segCounts = new byte[256];
 
-    private final byte[] counts = new byte[256];
-    private final short[] tops = new short[256 * RUNS];
-    private final short[] bottoms = new short[256 * RUNS];
-    private final short[] blocks = new short[256 * RUNS];
-    private final short[] sides = new short[256 * RUNS];
-    /** Height of the top block of a run in sixteenths: 16 for full blocks, less for slabs, snow layers and carpets. */
-    private final byte[] heights = new byte[256 * RUNS];
-    /** The plant on top of the highest run, 0 (air) for none. */
-    private final short[] plants = new short[256];
+    /** Where each column's segment list starts in the flat segment arrays. */
+    private final short[] segOffsets = new short[256];
+
+    /** Height of the top block of a column in sixteenths: 16 for full blocks, less for slabs, snow layers and carpets. */
+    private final byte[] topFraction = new byte[256];
+
+    /** Flat segment storage for the whole chunk: raw block ids, appended by the scan, grows by doubling. */
+    private short[] segBlocks = new short[512];
+
+    /** Segment heights in blocks, parallel to segBlocks. */
+    private short[] segHeights = new short[512];
+
+    /** How many segments are stored so far. */
+    private int segTotal;
+
     @SuppressWarnings("unchecked")
     private final @Nullable Holder<Biome>[] biomes = new Holder[256];
     private final int minY;
@@ -105,7 +116,7 @@ public final class ChunkSummary {
         this.source = source;
         this.minY = minY;
         this.maxY = maxY;
-        Arrays.fill(this.counts, NOT_SCANNED);
+        Arrays.fill(this.segCounts, NOT_SCANNED);
     }
 
     /** Decoded from disk: every column is known and there is nothing left to scan. */
@@ -243,7 +254,7 @@ public final class ChunkSummary {
 
     private int ensure(int x, int z) {
         int column = x + z * 16;
-        if (this.counts[column] == NOT_SCANNED) {
+        if (this.segCounts[column] == NOT_SCANNED) {
             this.scan(column);
         }
         return column;
@@ -252,140 +263,76 @@ public final class ChunkSummary {
     private void scan(int column) {
         Source source = this.source;
         if (source == null) {
-            this.counts[column] = 0;
+            this.segCounts[column] = 0;
+            this.topFraction[column] = 16;
             return;
         }
         int x = column & 15;
         int z = column >> 4;
         int start = source.top(x, z);
         int limit = Math.max(this.minY, start - SCAN_DEPTH);
-        int y = Math.min(start, this.maxY + 1) - 1;
-        int base = column * RUNS;
-        // One spare slot: when there are more runs than are kept, the two closest ones are joined, gap and all. Leaves join the ground
-        // under them, while a ship floating high above an island stays a ship instead of a pillar down to the ground.
-        Scratch scratch = SCRATCH.get();
-        int[] runTops = scratch.tops;
-        int[] runBottoms = scratch.bottoms;
-        int[] runBlocks = scratch.blocks;
-        int[] runSides = scratch.sides;
-        int[] runHeights = scratch.heights;
-        boolean[] runClear = scratch.clear;
-        boolean[] runLiquid = scratch.liquid;
-        int plant = 0;
-        int plantY = Integer.MIN_VALUE;
-        int runs = 0;
+        int topY = Math.min(start, this.maxY + 1) - 1;
+        int y = topY;
+
+        this.segOffsets[column] = (short) this.segTotal;
+        this.topFraction[column] = 16;
+        boolean topFound = false;
+        int surfaceY = topY;
+        int segments = 0;
+        int openBlock = -1;   // block of the segment being grown; -1 = no segment open yet / блок открытого сегмента, -1 = открытого пока нет
+        int openHeight = 0;
         while (y >= limit) {
             Look look = look(source.state(x, y, z));
-            while (look.block < 0) {
-                // The plant right on the ground is drawn on top of the highest run.
-                if (runs == 0 && look.plant != 0) {
-                    plant = look.plant;
-                    plantY = y;
+            int block = look.block >= 0 ? look.block : look.plant;
+            if (!topFound && look.block != -1) {
+                this.topFraction[column] = (byte) look.height;
+                surfaceY = y;
+                topFound = true;
+            }
+            if (block == openBlock) {
+                openHeight++;
+            } else {
+                if (openBlock != -1) {
+                    addSegment(openBlock, openHeight);
+                    segments++;
                 }
-                y--;
-                if (y < limit) {
+                if (segments == SEGMENT_CAP) {
+                    // Budget spent: this block and everything below folds into the last segment. / Бюджет кончился: этот блок и всё под ним уходит в последний сегмент.
+                    this.segHeights[this.segTotal - 1] += (short) (y - this.minY + 1);
+                    y = this.minY - 1;
                     break;
                 }
-                look = look(source.state(x, y, z));
+                openBlock = block;
+                openHeight = 1;
             }
-            if (y < limit) {
-                break;
-            }
-            int runTop = y + 1;
-            int block = look.block;
-            int side = block;
-            int under = -1;
-            int height = look.height;
-            boolean clear = look.clear;
-            boolean liquid = look.liquid;
-            while (y >= limit) {
-                Look below = look(source.state(x, y, z));
-                int depth = runTop - 1 - y;
-                // A thin block on top (snow on a tree, leaf litter, a carpet) always belongs to what it lies on: it covers only the top,
-                // the sides are that block, and the run can be seen through when that block can. Not on a liquid: a lily pad floats.
-                boolean underThin = depth == 1 && height < 16 && below.block >= 0 && below.liquid == liquid;
-                // Water, leaves and other blocks that can be seen through are separate runs from the ground under them: it is seen too.
-                // So are blocks on liquids, though both can be seen through: ice floats on the water instead of reaching to its bottom.
-                if (below.block < 0 || (below.clear != clear || below.liquid != liquid) && !underThin) {
-                    break;
-                }
-                if (underThin) {
-                    clear = below.clear;
-                }
-                if (underThin || depth == SIDE_DEPTH && height == 16) {
-                    side = below.block;
-                }
-                if (depth == 1) {
-                    under = below.block;
-                }
-                y--;
-            }
-            // Only a plant standing right on the highest run counts; vines hanging in the air do not.
-            if (runs == 0 && plantY != runTop) {
-                plant = 0;
-            }
-            runTops[runs] = runTop;
-            runBottoms[runs] = y + 1;
-            runBlocks[runs] = block;
-            // A run too short for the side depth still has its sides made of what lies under the top block: a chorus flower on its
-            // stalk, a short grass step over dirt.
-            runSides[runs] = side == block && under >= 0 ? under : side;
-            runHeights[runs] = height;
-            runClear[runs] = clear;
-            runLiquid[runs] = liquid;
-            runs++;
-            if (runs > RUNS) {
-                // A joined run keeps the look of the upper one, so water or leaves joined with the ground under them would hide that
-                // ground, which is seen through them. That is never done while anything else can be joined; ground with water under it, a
-                // flooded cave, is joined like any other run. Least of all a thin block floating on a liquid with it (ice, a lily pad):
-                // it would reach down to the bottom. Only thin ones at the top of the column: ground over a flooded cave, or a thin floor
-                // of gravel over a pocket of water under the seabed, kept from that would have the water over it joined with it
-                // instead, the seabed turning into a shaft of water.
-                // Under the ground the gaps are caves no one sees from outside: those are joined first. Over it the floors and roofs of
-                // a structure are joined with each other next, and the gap between a structure and the ground under it last of all: a
-                // tower on legs or a platform over the ground stays standing over it instead of becoming a pillar down to the ground.
-                int ground = runs;
-                for (int i = 0; i < runs; i++) {
-                    if (!runLiquid[i] && !runClear[i] && runTops[i] - runBottoms[i] >= GROUND_THICKNESS) {
-                        ground = i;
-                        break;
-                    }
-                }
-                int closest = 0;
-                long closestCost = Long.MAX_VALUE;
-                for (int i = 0; i < runs - 1; i++) {
-                    boolean floating = i == 0 && !runLiquid[i] && runLiquid[i + 1] && runTops[i] - runBottoms[i] <= FLOATING_THICKNESS;
-                    long cost = runBottoms[i] - runTops[i + 1] + (runClear[i] && !runClear[i + 1] ? 1L << 32 : 0L)
-                        + (floating ? 1L << 33 : 0L) + (i + 1 < ground ? 1L << 30 : i + 1 == ground ? 1L << 31 : 0L);
-                    if (cost < closestCost) {
-                        closestCost = cost;
-                        closest = i;
-                    }
-                }
-                runBottoms[closest] = runBottoms[closest + 1];
-                for (int i = closest + 1; i < runs - 1; i++) {
-                    runTops[i] = runTops[i + 1];
-                    runBottoms[i] = runBottoms[i + 1];
-                    runBlocks[i] = runBlocks[i + 1];
-                    runSides[i] = runSides[i + 1];
-                    runHeights[i] = runHeights[i + 1];
-                    runClear[i] = runClear[i + 1];
-                    runLiquid[i] = runLiquid[i + 1];
-                }
-                runs--;
-            }
+            y--;
         }
-        for (int run = 0; run < runs; run++) {
-            this.tops[base + run] = (short) runTops[run];
-            this.bottoms[base + run] = (short) runBottoms[run];
-            this.blocks[base + run] = (short) runBlocks[run];
-            this.sides[base + run] = (short) runSides[run];
-            this.heights[base + run] = (byte) runHeights[run];
+        if (openBlock != -1 && y >= this.minY - 1 && segments < SEGMENT_CAP) {
+            addSegment(openBlock, openHeight);
+            segments++;
         }
-        this.counts[column] = (byte) runs;
-        this.plants[column] = (short) plant;
-        this.biomes[column] = source.biome(x, (runs > 0 ? this.tops[base] : start) - 1, z);
+        if (segments == 0) {
+            addSegment(0, topY + 1 - this.minY);
+            segments = 1;
+        } else if (limit > this.minY && segments < SEGMENT_CAP) {
+            // The scan window ended above the world bottom: the last segment stretches down. / Окно скана кончилось выше дна мира: последний сегмент тянется вниз.
+            this.segHeights[this.segTotal - 1] += (short) (limit - this.minY);
+        }
+        this.segCounts[column] = (byte) segments;
+        this.biomes[column] = source.biome(x, surfaceY, z);
     }
+
+    /** Appends one segment to the flat arrays, growing them by doubling when full. / Дописывает один сегмент в плоские массивы, удваивая их при заполнении. */
+    private void addSegment(int block, int height) {
+        if (this.segTotal == this.segBlocks.length) {
+            this.segBlocks = java.util.Arrays.copyOf(this.segBlocks, this.segBlocks.length * 2);
+            this.segHeights = java.util.Arrays.copyOf(this.segHeights, this.segHeights.length * 2);
+        }
+        this.segBlocks[this.segTotal] = (short) block;
+        this.segHeights[this.segTotal] = (short) height;
+        this.segTotal++;
+    }
+
 
     /**
      * What a block state looks like from far away. Air and blocks invisible on maps (glass, barriers, light) are not drawn. Plants,

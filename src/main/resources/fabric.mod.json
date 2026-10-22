@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "farplanetwocontinuation",
   "version": "${version}",
-  "name": "FarPlaneTwoContinuation",
+  "name": "FarPlaneTwo Continuation",
   "description": "Level-of-detail terrain up to the edge of the world (30 000 000 blocks). A continuation of the idea of FarPlaneTwo by DaPorkchop_. Works on PC and on Android. Install on both the client and the server; in singleplayer the client is enough. The list of commands: /FPhelp",
   "authors": [
     "Evga314"

@@ -107,7 +107,7 @@ public final class PerfLog {
     private static int ticks;
     private static @Nullable Map<String, String> lastSettings;
     // Mesh builder threads, by layer: 0 = rough, 1 = detail.
-    // RU: ядра меш билдера, 0 - дальний, 1 - детальный
+    // RU: потоки меш билдера, 0 - дальний, 1 - детальный
     private static final AtomicLong[] meshNs = {new AtomicLong(), new AtomicLong()};
     private static final AtomicLong[] meshes = {new AtomicLong(), new AtomicLong()};
     private static final AtomicLong[] meshNsMax = {new AtomicLong(), new AtomicLong()};

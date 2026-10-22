@@ -12,7 +12,7 @@
 - **Потом** - ждёт чего-то: другого пункта
 
 баг - вообще не работает настройка для выставления дальности тумана. Подсказки от пользователей: so for the fog to work right had to use smooth skies with sodium extra and setting the fog to either cylindrical or radial and set the fog distance to the amount of chunks you want since it's limited by default use bobby change change the max chunks to whatever number and for the fog in sodium extra i set the chunks to 96 and start to 0%.
-and also using the custom fog setup like what i said above it only works on the distant terrain not the real terrain for some reason
+and also using the custom fog setup like what i said above it only works on the distant terrain not the real terrain for some reason. у пользователя стоит sodium extra with smooth skies, и эта связка работает некорректно
 
 улучщение/баг - исправить рваный и неправильной высоты спуск островов энда дальнего ландшафта
 

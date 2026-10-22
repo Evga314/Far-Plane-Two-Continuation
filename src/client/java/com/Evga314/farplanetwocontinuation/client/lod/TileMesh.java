@@ -78,7 +78,7 @@ final class TileMesh implements AutoCloseable {
     /** Distance to the camera in the current frame, used to draw near tiles first. */
     double sortDistance;
 
-    TileMesh(TilePos pos, GpuBuffer vertices, TileMeshBuilder.Built built, long receivedAt) {
+    TileMesh(TilePos pos, GpuBuffer vertices, GeneralMeshFactory.Built built, long receivedAt) {
         this.pos = pos;
         this.vertices = vertices;
         this.minY = built.minY();

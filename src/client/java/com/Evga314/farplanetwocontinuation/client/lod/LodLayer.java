@@ -58,7 +58,7 @@ abstract class LodLayer {
      * They count as loaded until they are due again; without this they would be asked for again every tick.
      */
     private final Long2LongOpenHashMap empty = new Long2LongOpenHashMap();
-    private final ConcurrentLinkedQueue<TileMeshBuilder.Built> built = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<GeneralMeshFactory.Built> built = new ConcurrentLinkedQueue<>();
     /** Meshes replaced by fresher data. They may still be in this tick's draw list, so they are closed on the next tick. */
     private final List<TileMesh> retired = new ArrayList<>();
     private List<TileMesh> drawList = List.of();
@@ -149,7 +149,7 @@ abstract class LodLayer {
     abstract void sendRequests(int[] requests);
 
     /** Decodes and meshes one tile on a mesh builder thread. Throws on bad data. */
-    abstract TileMeshBuilder.Built build(byte[] data, long key, int epoch, Registry<Biome> biomes, int seaLevel) throws Exception;
+    abstract GeneralMeshFactory.Built build(byte[] data, long key, int epoch, Registry<Biome> biomes, int seaLevel) throws Exception;
 
     List<TileMesh> drawList() {
         return this.drawList;
@@ -248,7 +248,7 @@ abstract class LodLayer {
 
     /** Something a mesh builder thread makes a tile's mesh with, for the epoch it was started in. */
     interface Work {
-        TileMeshBuilder.Built run(int epoch) throws Exception;
+        GeneralMeshFactory.Built run(int epoch) throws Exception;
     }
 
     /** Builds a tile's mesh on a mesh builder thread; it replaces the one drawn when it is uploaded. */
@@ -265,7 +265,7 @@ abstract class LodLayer {
                     }
                 } catch (Exception e) {
                     LOGGER.debug("Dropping bad {} tile {}", this.name, TilePos.unpack(key), e);
-                    this.built.add(TileMeshBuilder.Built.failed(key, buildEpoch));
+                    this.built.add(GeneralMeshFactory.Built.failed(key, buildEpoch));
                 }
             });
         } catch (RejectedExecutionException e) {
@@ -294,7 +294,7 @@ abstract class LodLayer {
                 if (budget < startBudget && System.nanoTime() >= deadline) {
                     break;
                 }
-                TileMeshBuilder.Built result = this.built.poll();
+                GeneralMeshFactory.Built result = this.built.poll();
                 if (result == null) {
                     break;
                 }
@@ -342,7 +342,7 @@ abstract class LodLayer {
         return budget;
     }
 
-    private void finishUpload(TileMeshBuilder.Built result, GpuBuffer buffer) {
+    private void finishUpload(GeneralMeshFactory.Built result, GpuBuffer buffer) {
         if (PerfLog.ON) {
             PerfLog.uploaded(result.vertices().remaining());
         }
@@ -363,11 +363,11 @@ abstract class LodLayer {
 
     /** A mesh being written to the GPU in parts, see {@link #upload}. */
     private static final class PartialUpload {
-        final TileMeshBuilder.Built result;
+        final GeneralMeshFactory.Built result;
         final GpuBuffer buffer;
         int written;
 
-        PartialUpload(TileMeshBuilder.Built result, GpuBuffer buffer) {
+        PartialUpload(GeneralMeshFactory.Built result, GpuBuffer buffer) {
             this.result = result;
             this.buffer = buffer;
         }

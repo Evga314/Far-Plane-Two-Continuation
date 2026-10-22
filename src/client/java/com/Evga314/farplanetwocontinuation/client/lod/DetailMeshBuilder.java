@@ -92,7 +92,7 @@ final class DetailMeshBuilder {
         }
     }
 
-    static TileMeshBuilder.Built build(long key, int epoch, DetailData data, List<@Nullable Holder<Biome>> biomes, BlockDetail detail) {
+    static GeneralMeshFactory.Built build(long key, int epoch, DetailData data, List<@Nullable Holder<Biome>> biomes, BlockDetail detail) {
         TilePos pos = TilePos.unpack(key);
         int cell = 1 << (pos.level() - 1);
         long baseX = pos.minX();
@@ -224,7 +224,7 @@ final class DetailMeshBuilder {
             minY = 0.0F;
             maxY = 0.0F;
         }
-        return new TileMeshBuilder.Built(
+        return new GeneralMeshFactory.Built(
             key, epoch, vertices, minY, maxY, minY, null, out.quads * 6, true, coverage(data, cell), data.isComplete(), segments, chunkSurfaces,
             textured, hasWater, chunkPlants, out.cutout
         );
@@ -414,11 +414,11 @@ final class DetailMeshBuilder {
         BlockDetail detail
     ) {
         private float x(int cx) {
-            return TileMeshBuilder.localCoordinate(this.baseX, cx * this.cell, 1);
+            return GeneralMeshFactory.localCoordinate(this.baseX, cx * this.cell, 1);
         }
 
         private float z(int cz) {
-            return TileMeshBuilder.localCoordinate(this.baseZ, cz * this.cell, 1);
+            return GeneralMeshFactory.localCoordinate(this.baseZ, cz * this.cell, 1);
         }
 
         /**

@@ -162,7 +162,7 @@ final class RoughLayer extends LodLayer {
     }
 
     @Override
-    TileMeshBuilder.Built build(byte[] bytes, long key, int epoch, Registry<Biome> biomes, int seaLevel) throws Exception {
+    GeneralMeshFactory.Built build(byte[] bytes, long key, int epoch, Registry<Biome> biomes, int seaLevel) throws Exception {
         TileData data = TileData.decode(bytes);
         this.registry = biomes;
         this.seaLevel = seaLevel;
@@ -179,7 +179,7 @@ final class RoughLayer extends LodLayer {
         return this.buildWithNeighbours(key, epoch, data, biomes, seaLevel);
     }
 
-    private TileMeshBuilder.Built buildWithNeighbours(long key, int epoch, TileData data, Registry<Biome> biomes, int seaLevel) {
+    private GeneralMeshFactory.Built buildWithNeighbours(long key, int epoch, TileData data, Registry<Biome> biomes, int seaLevel) {
         TilePos pos = TilePos.unpack(key);
         TileData[] around = new TileData[9];
         for (int d = 0; d < 9; d++) {

@@ -9,9 +9,7 @@ import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
-import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
-import net.minecraft.resources.ResourceKey;
 import net.minecraft.util.ARGB;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.biome.Biome;
@@ -59,8 +57,10 @@ public final class TileMeshBuilder {
     /** Heights come from the server, keep them in a sane range so a bad tile can only look wrong locally. */
     private static final int MIN_HEIGHT = -4096;
     private static final int MAX_HEIGHT = 8192;
-
-
+    /**
+     * Tree tops are stored in the alpha of a vertex as 255 minus their height in quarter blocks, so the shader can lay them flat inside
+     * the detailed terrain and vanilla's chunks. Alpha 0 stays the mark of the void.
+     */
     private static final float CANOPY_UNITS = 4.0F;
     private static final float MAX_CANOPY = 30.0F;
     /** Vanilla's shades of block faces, the same ones detailed tiles use. */
@@ -80,26 +80,10 @@ public final class TileMeshBuilder {
     private TileMeshBuilder() {
     }
 
-    public record Built(
-        long key, int epoch, @Nullable ByteBuffer vertices, float minY, float maxY, float terrainMinY, short @Nullable [] heights, int indexCount,
-        boolean detail, long coverage, boolean complete, int @Nullable [] segments, int @Nullable [] chunkSurfaces, boolean textured,
-        boolean hasWater, int @Nullable [] chunkPlants, boolean hasCutout
-    ) {
-        /** A tile whose data could not be used; it is dropped quietly. */
-        static Built failed(long key, int epoch) {
-            return new Built(key, epoch, null, 0.0F, 0.0F, 0.0F, null, 0, false, 0L, false, null, null, false, false, null, false);
-        }
-    }
-
     /**
      * @param floating islands over the void (the End): the skirts that close the gaps between tiles of different detail would hang
      *                 under every island edge like curtains there, so they are left out
      */
-    /**
-     * How many times the values of each kind of border are evened out with their neighbours: more rounds the borders off further and
-     * lets wider lone strips fade.
-     */
-
     /**
      * The samples of a tile with a margin of its neighbours' around it, see {@link #grid}. Biomes are indices into {@link #palette},
      * which holds those of the neighbours too.
@@ -173,7 +157,7 @@ public final class TileMeshBuilder {
             remap[d] = map;
             neighbours |= 1 << d;
         }
-        Grid grid = new Grid(coarse, java.util.Arrays.asList(resolveBiomes(registry, ids)), neighbours);
+        Grid grid = new Grid(coarse, java.util.Arrays.asList(GeneralMeshFactory.resolveBiomes(registry, ids)), neighbours);
         for (int gz = 0; gz < S; gz++) {
             for (int gx = 0; gx < S; gx++) {
                 int x = gx - MARGIN;
@@ -213,7 +197,7 @@ public final class TileMeshBuilder {
         return grid;
     }
 
-    public static Built build(long key, int epoch, Grid data, int seaLevel, boolean floating, GeneralMeshFactory.Smoothing smoothing) {
+    public static GeneralMeshFactory.Built build(long key, int epoch, Grid data, int seaLevel, boolean floating, GeneralMeshFactory.Smoothing smoothing) {
         try {
             return buildOnGrid(key, epoch, data, seaLevel, floating, smoothing);
         } finally {
@@ -283,7 +267,7 @@ public final class TileMeshBuilder {
         }
     }
 
-    private static Built buildOnGrid(long key, int epoch, Grid data, int seaLevel, boolean floating, GeneralMeshFactory.Smoothing smoothing) {
+    private static GeneralMeshFactory.Built buildOnGrid(long key, int epoch, Grid data, int seaLevel, boolean floating, GeneralMeshFactory.Smoothing smoothing) {
         List<@Nullable Holder<Biome>> biomes = data.palette;
         TilePos pos = TilePos.unpack(key);
         int spacing = 1 << pos.level();
@@ -465,7 +449,7 @@ public final class TileMeshBuilder {
                 minY = Math.min(minY, tops[index]);
                 maxY = Math.max(maxY, tops[index]);
                 tileHeights[x + z * OUT] = realHeights != null ? realHeights[index] : heights[index];
-                putVertex(buffer, localCoordinate(tileX, x, spacing), tops[index], localCoordinate(tileZ, z, spacing), colors[index], alphas[index],
+                putVertex(buffer, GeneralMeshFactory.localCoordinate(tileX, x, spacing), tops[index], GeneralMeshFactory.localCoordinate(tileZ, z, spacing), colors[index], alphas[index],
                     softness[index], waterColors[index], coast[index], thirdColors[index], thirdValues[index], waterThird[index], waterSplit[index]);
             }
         }
@@ -499,7 +483,7 @@ public final class TileMeshBuilder {
                 // The coast value of the bottom is the top's side: under open water a land value would turn the lower half of the skirt
                 // into land for the shader, drawn with depth where only water is left to the pass under the detailed tiles, and it
                 // would flicker against their seabed.
-                putVertex(buffer, localCoordinate(tileX, x, spacing), tops[index] - depth, localCoordinate(tileZ, z, spacing), skirtColor,
+                putVertex(buffer, GeneralMeshFactory.localCoordinate(tileX, x, spacing), tops[index] - depth, GeneralMeshFactory.localCoordinate(tileZ, z, spacing), skirtColor,
                     floating ? 0 : alphas[index], 0, skirtColor, openWater ? 1.0F : -1.0F, skirtColor, NO_SPLIT, skirtColor, NO_SPLIT);
             }
         }
@@ -508,7 +492,7 @@ public final class TileMeshBuilder {
         }
         buffer.flip();
         int indexCount = floating ? FLOATING_INDEX_COUNT : INDEX_COUNT;
-        return new Built(key, epoch, buffer, minY - deepest, maxY, minY, tileHeights, indexCount, false, 0L, true, null, null, false, false, null, false);
+        return new GeneralMeshFactory.Built(key, epoch, buffer, minY - deepest, maxY, minY, tileHeights, indexCount, false, 0L, true, null, null, false, false, null, false);
     }
 
     /** The sample of the grid with the margin at a sample of the tile. */
@@ -2072,12 +2056,6 @@ public final class TileMeshBuilder {
         };
     }
 
-    /** Position relative to the tile corner, cut at the world border so edge tiles end exactly where the world ends. */
-    static float localCoordinate(long base, int sample, int spacing) {
-        long world = Mth.clamp(base + (long) sample * spacing, -FarPlaneConstants.WORLD_LIMIT, FarPlaneConstants.WORLD_LIMIT);
-        return (float) (world - base);
-    }
-
     /**
      * Gives every void sample the height of the nearest land sample, so a floating tile's surface runs level between its islands.
      * Only the heights move: the void stays the void, and a tile of nothing but void keeps its heights, as there is no land in it.
@@ -2145,7 +2123,7 @@ public final class TileMeshBuilder {
                 float depth = Math.min(Math.max(0.0F, distances[index]) * spacing * UNDERSIDE_SLOPE, UNDERSIDE_MAX_DEPTH);
                 deepest = Math.max(deepest, depth);
                 int color = ARGB.scaleRGB(colors[index], UNDERSIDE_SHADE);
-                putVertex(buffer, localCoordinate(tileX, x, spacing), tops[index] - depth, localCoordinate(tileZ, z, spacing), color, alphas[index], 0,
+                putVertex(buffer, GeneralMeshFactory.localCoordinate(tileX, x, spacing), tops[index] - depth, GeneralMeshFactory.localCoordinate(tileZ, z, spacing), color, alphas[index], 0,
                     color, distances[index], color, NO_SPLIT, color, NO_SPLIT);
             }
         }
@@ -2283,12 +2261,4 @@ public final class TileMeshBuilder {
         buffer.putShort((short) b).putShort((short) c).putShort((short) d);
     }
 
-    public static Holder<Biome>[] resolveBiomes(Registry<Biome> registry, List<Identifier> palette) {
-        @SuppressWarnings("unchecked")
-        Holder<Biome>[] result = new Holder[palette.size()];
-        for (int i = 0; i < result.length; i++) {
-            result[i] = registry.get(ResourceKey.create(Registries.BIOME, palette.get(i))).orElse(null);
-        }
-        return result;
-    }
 }

@@ -23,6 +23,10 @@ Latest release versions available on [Curseforge](https://www.curseforge.com/min
 Fabric API for 26.3 is required. If the server does not have the mod, the client simply does not draw LOD terrain and the game works
 as usual.
 
+## Dependencies
+
+From version 1.2.114 Sodium is required. Optional - Mod menu
+
 ## Settings
 
 **Options → Video Settings → "Far Plane (Distant Terrain)..."**. The button lives right in the menu, so no keyboard is needed on a phone.

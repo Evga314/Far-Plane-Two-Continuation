@@ -1,7 +1,7 @@
 package com.Evga314.farplanetwocontinuation.client;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
-import com.Evga314.farplanetwocontinuation.client.lod.TileMeshBuilder;
+import com.Evga314.farplanetwocontinuation.client.lod.GeneralMeshFactory;
 import com.Evga314.farplanetwocontinuation.config.ConfigFiles;
 import com.Evga314.farplanetwocontinuation.dimension.DimensionKind;
 import java.util.LinkedHashMap;
@@ -106,7 +106,7 @@ public class ClientConfig {
      */
     public static class Smoothing {
         public static final int MAX = 8;
-        private static final TileMeshBuilder.Smoothing DEFAULT = TileMeshBuilder.Smoothing.DEFAULT;
+        private static final GeneralMeshFactory.Smoothing DEFAULT = GeneralMeshFactory.Smoothing.DEFAULT;
 
         public int coasts = DEFAULT.coasts();
         public int snow = DEFAULT.snow();
@@ -121,7 +121,7 @@ public class ClientConfig {
         public int waterBlur = DEFAULT.waterBlur();
         /** Baked sun and hollow shade over the distant terrain: 0 off, 1 on. */
         public int shading = DEFAULT.shading();
-        public static final int MAX_BLUR = TileMeshBuilder.MAX_SOFTNESS;
+        public static final int MAX_BLUR = GeneralMeshFactory.MAX_SOFTNESS;
         /** Version of these settings: 1.2.42 set the blur of water borders higher on its own, which is taken back. */
         public int version;
         private static final int VERSION = 3;
@@ -149,8 +149,8 @@ public class ClientConfig {
                 + this.snowBlur + "," + this.forestsBlur + "," + this.biomesBlur + "," + this.waterBlur + "," + this.shading;
         }
 
-        public TileMeshBuilder.Smoothing forBuilder() {
-            return new TileMeshBuilder.Smoothing(
+        public GeneralMeshFactory.Smoothing forBuilder() {
+            return new GeneralMeshFactory.Smoothing(
                 this.coasts, this.snow, this.forests, this.biomes, this.water, this.coastsBlur, this.snowBlur, this.forestsBlur,
                 this.biomesBlur, this.waterBlur, this.shading
             );

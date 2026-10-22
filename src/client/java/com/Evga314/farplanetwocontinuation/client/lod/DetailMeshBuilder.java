@@ -258,7 +258,7 @@ final class DetailMeshBuilder {
             return new Paint(tint, face.sprite(), false, true);
         }
         if (water) {
-            int color = ARGB.scaleRGB(around == null ? TileColors.waterColor(biome) : blendedWaterColor(around, biome, false), TileMeshBuilder.WATER_SHADE);
+            int color = ARGB.scaleRGB(around == null ? TileColors.waterColor(biome) : blendedWaterColor(around, biome, false), GeneralMeshFactory.WATER_SHADE);
             return new Paint(color, null, false);
         }
         if (!textured || face.sprite() == null) {
@@ -830,7 +830,7 @@ final class DetailMeshBuilder {
 
         QuadWriter(boolean textured) {
             this.textured = textured;
-            this.vertexSize = textured ? TEXTURED_VERTEX_SIZE : TileMeshBuilder.VERTEX_SIZE;
+            this.vertexSize = textured ? TEXTURED_VERTEX_SIZE : GeneralMeshFactory.VERTEX_SIZE;
             this.buffers = SCRATCH.get();
             for (ByteBuffer group : this.buffers) {
                 group.clear();

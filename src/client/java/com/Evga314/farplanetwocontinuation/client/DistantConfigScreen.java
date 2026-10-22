@@ -1,6 +1,7 @@
 package com.Evga314.farplanetwocontinuation.client;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
+import com.Evga314.farplanetwocontinuation.client.lod.GeneralMeshFactory;
 import com.Evga314.farplanetwocontinuation.client.lod.TileMeshBuilder;
 import com.Evga314.farplanetwocontinuation.dimension.DimensionKind;
 import net.minecraft.client.Minecraft;
@@ -16,7 +17,7 @@ import net.minecraft.util.Mth;
 /** Settings of the rough distant terrain, for one kind of dimension. */
 public class DistantConfigScreen extends OptionsSubScreen {
     private static final String PREFIX = FarPlaneConstants.MOD_ID + ".options.";
-    private static final long TILE_BYTES = (long) TileMeshBuilder.VERTEX_COUNT * TileMeshBuilder.ROUGH_VERTEX_SIZE;
+    private static final long TILE_BYTES = (long) TileMeshBuilder.VERTEX_COUNT * GeneralMeshFactory.ROUGH_VERTEX_SIZE;
 
     private final String initialSignature = FarplanetwocontinuationClient.manager().config().tileSignature();
     private final DimensionKind dimension;

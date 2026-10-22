@@ -26,10 +26,6 @@ import org.jspecify.annotations.Nullable;
  * keeping the edge as it is, which showed as a line along every tile edge.
  */
 public final class TileMeshBuilder {
-    /** Flat colored detailed tiles: position and color. */
-    public static final int VERTEX_SIZE = 16;
-    /** Rough tiles: position, land color, second color and the colors beyond the borders on land and between waters, see {@link #putVertex}. */
-    public static final int ROUGH_VERTEX_SIZE = 28;
     /** Samples along the edge of the drawn tile, and its cells. */
     private static final int OUT = FarPlaneConstants.TILE_SAMPLES;
     private static final int OUT_C = FarPlaneConstants.TILE_CELLS;
@@ -64,11 +60,7 @@ public final class TileMeshBuilder {
     private static final int MIN_HEIGHT = -4096;
     private static final int MAX_HEIGHT = 8192;
 
-    static final float WATER_SHADE = 0.92F;
-    /**
-     * Tree tops are stored in the alpha of a vertex as 255 minus their height in quarter blocks, so the shader can lay them flat inside
-     * the detailed terrain and vanilla's chunks. Alpha 0 stays the mark of the void.
-     */
+
     private static final float CANOPY_UNITS = 4.0F;
     private static final float MAX_CANOPY = 30.0F;
     /** Vanilla's shades of block faces, the same ones detailed tiles use. */
@@ -107,12 +99,6 @@ public final class TileMeshBuilder {
      * How many times the values of each kind of border are evened out with their neighbours: more rounds the borders off further and
      * lets wider lone strips fade.
      */
-    public record Smoothing(
-        int coasts, int snow, int forests, int biomes, int water, int coastsBlur, int snowBlur, int forestsBlur, int biomesBlur,
-        int waterBlur, int shading
-    ) {
-        public static final Smoothing DEFAULT = new Smoothing(4, 3, 3, 3, 3, 0, 0, 2, 3, 3, 1);
-    }
 
     /**
      * The samples of a tile with a margin of its neighbours' around it, see {@link #grid}. Biomes are indices into {@link #palette},
@@ -227,7 +213,7 @@ public final class TileMeshBuilder {
         return grid;
     }
 
-    public static Built build(long key, int epoch, Grid data, int seaLevel, boolean floating, Smoothing smoothing) {
+    public static Built build(long key, int epoch, Grid data, int seaLevel, boolean floating, GeneralMeshFactory.Smoothing smoothing) {
         try {
             return buildOnGrid(key, epoch, data, seaLevel, floating, smoothing);
         } finally {
@@ -297,7 +283,7 @@ public final class TileMeshBuilder {
         }
     }
 
-    private static Built buildOnGrid(long key, int epoch, Grid data, int seaLevel, boolean floating, Smoothing smoothing) {
+    private static Built buildOnGrid(long key, int epoch, Grid data, int seaLevel, boolean floating, GeneralMeshFactory.Smoothing smoothing) {
         List<@Nullable Holder<Biome>> biomes = data.palette;
         TilePos pos = TilePos.unpack(key);
         int spacing = 1 << pos.level();
@@ -314,7 +300,7 @@ public final class TileMeshBuilder {
             realHeights = data.heights.clone();
             fillVoidHeights(data);
         }
-        ByteBuffer buffer = ByteBuffer.allocateDirect((floating ? VERTEX_COUNT + OUT * OUT : VERTEX_COUNT) * ROUGH_VERTEX_SIZE).order(ByteOrder.nativeOrder());
+        ByteBuffer buffer = ByteBuffer.allocateDirect((floating ? VERTEX_COUNT + OUT * OUT : VERTEX_COUNT) * GeneralMeshFactory.ROUGH_VERTEX_SIZE).order(ByteOrder.nativeOrder());
         // Every sample has a land color and a water color, and a value telling how far it is from the coast; the shader draws a sharp
         // coast where that value crosses zero, instead of blending land into water over a whole cell. See shapeCoasts.
         int[] colors = Scratch.ints();
@@ -381,16 +367,16 @@ public final class TileMeshBuilder {
                     hasLand[index] = wet[index] < 1.0F;
                 } else {
                     int waterColor = TileColors.color(biome, worldX, (int) height, worldZ, true, false, 0.0F, 0.0F, seaLevel, scratch);
-                    waterColors[index] = ARGB.scaleRGB(waterColor, WATER_SHADE);
+                    waterColors[index] = ARGB.scaleRGB(waterColor, GeneralMeshFactory.WATER_SHADE);
                     iceShares[index] = TileColors.isIcy(biome, worldX, (int) height, worldZ, seaLevel, scratch) ? 1.0F : 0.0F;
-                    openWaters[index] = ARGB.scaleRGB(TileColors.waterColor(biome), WATER_SHADE);
+                    openWaters[index] = ARGB.scaleRGB(TileColors.waterColor(biome), GeneralMeshFactory.WATER_SHADE);
                     if (water) {
                         wet[index] = 1.0F;
                     } else {
                         int color = (flags & TileData.FLAG_ICEBERG) != 0
                             ? TileColors.icebergColor(biome, worldX, (int) height, worldZ, sides, flags)
                             : TileColors.color(biome, worldX, (int) height, worldZ, false, lava, slope, sides, seaLevel, scratch);
-                        colors[index] = ARGB.scaleRGB(color, lava ? WATER_SHADE : landShade);
+                        colors[index] = ARGB.scaleRGB(color, lava ? GeneralMeshFactory.WATER_SHADE : landShade);
                         hasLand[index] = true;
                     }
                 }
@@ -558,7 +544,7 @@ public final class TileMeshBuilder {
             int color = !isWater && frozenOcean
                 ? TileColors.icebergColor(biome, x, height, z, sides, 0)
                 : TileColors.color(biome, x, height, z, isWater, false, isWater ? 0.0F : slope, isWater ? 0.0F : sides, seaLevel, scratch);
-            color = ARGB.scaleRGB(color, isWater ? WATER_SHADE : landShade);
+            color = ARGB.scaleRGB(color, isWater ? GeneralMeshFactory.WATER_SHADE : landShade);
             if (!isWater) {
                 landRed += ARGB.red(color);
                 landGreen += ARGB.green(color);
@@ -581,7 +567,7 @@ public final class TileMeshBuilder {
         Holder<Biome> middle = biomes.get(data.subBiomes[index * TileData.SUB_SAMPLES + 4] & 0xFF);
         openWaters[index] = openCount > 0
             ? ARGB.color(255, openRed / openCount, openGreen / openCount, openBlue / openCount)
-            : ARGB.scaleRGB(TileColors.waterColor(middle), WATER_SHADE);
+            : ARGB.scaleRGB(TileColors.waterColor(middle), GeneralMeshFactory.WATER_SHADE);
         iceShares[index] = waterCount > 0
             ? icyCount / (float) waterCount
             : TileColors.isIcy(middle, x, height, z, seaLevel, scratch) ? 1.0F : 0.0F;
@@ -593,7 +579,7 @@ public final class TileMeshBuilder {
             waterColors[index] = ARGB.color(255, waterRed / waterCount, waterGreen / waterCount, waterBlue / waterCount);
         } else {
             Holder<Biome> biome = biomes.get(data.subBiomes[index * TileData.SUB_SAMPLES + 4] & 0xFF);
-            waterColors[index] = ARGB.scaleRGB(TileColors.color(biome, x, height, z, true, false, 0.0F, 0.0F, seaLevel, scratch), WATER_SHADE);
+            waterColors[index] = ARGB.scaleRGB(TileColors.color(biome, x, height, z, true, false, 0.0F, 0.0F, seaLevel, scratch), GeneralMeshFactory.WATER_SHADE);
         }
         wet[index] = waterCount / (float) TileData.SUB_SAMPLES;
     }
@@ -633,7 +619,7 @@ public final class TileMeshBuilder {
                 }
                 Holder<Biome> biome = biomes.get(data.biomes[index] & 0xFF);
                 waterColors[index] = icy
-                    ? ARGB.scaleRGB(TileColors.iceColor(biome, worldCoordinate(baseX, x, spacing), 0, worldCoordinate(baseZ, z, spacing)), WATER_SHADE)
+                    ? ARGB.scaleRGB(TileColors.iceColor(biome, worldCoordinate(baseX, x, spacing), 0, worldCoordinate(baseZ, z, spacing)), GeneralMeshFactory.WATER_SHADE)
                     : openWaters[index];
             }
         }
@@ -1731,8 +1717,6 @@ public final class TileMeshBuilder {
      * half the step are taken as one, see {@link #colorClasses}.
      */
     private static final int WATER_COLOR_STEP = 8;
-    /** Steps of softness a sample can have, see {@link #putVertex}: 0 sharp, then wider and wider. */
-    public static final int MAX_SOFTNESS = 5;
 
     /** Trees start to thin out from this slope on and are gone from the next one, see the tree tops in {@link #build}. */
     private static final float TREES_THIN_SLOPE = 0.9F;
@@ -2212,7 +2196,7 @@ public final class TileMeshBuilder {
 
     /**
      * The alpha of the land color: 0 marks the void, where the shader drops everything closer to a void sample than to land. Land is
-     * 1 and up: 21 steps per softness of its border (0 sharp up to {@link #MAX_SOFTNESS}, each twice as wide as the one before), and
+     * 1 and up: 21 steps per softness of its border (0 sharp up to {@link GeneralMeshFactory#MAX_SOFTNESS}, each twice as wide as the one before), and
      * within them the height of the tree tops in steps of 1.5 blocks. After the land color comes the second color (water), with the
      * value of {@link #shapeCoasts} in its alpha, -{@link #COAST_RANGE} to 1 as 0 to 255. Then come the colors beyond the borders on
      * land (the snow line, forest edges, biomes) and between waters (of different temperatures), each with the value of its border in
@@ -2225,7 +2209,7 @@ public final class TileMeshBuilder {
         ByteBuffer buffer, float x, float y, float z, int argb, int alpha, int softness, int water, float coast, int landThird,
         float landSplit, int waterThird, float waterSplit
     ) {
-        int steps = Mth.clamp(softness, 0, MAX_SOFTNESS) * 21 + Math.min(20, Math.round((255 - alpha) / CANOPY_UNITS / 1.5F));
+        int steps = Mth.clamp(softness, 0, GeneralMeshFactory.MAX_SOFTNESS) * 21 + Math.min(20, Math.round((255 - alpha) / CANOPY_UNITS / 1.5F));
         int code = alpha == 0 ? 0 : 1 + steps;
         buffer.putFloat(x).putFloat(y).putFloat(z);
         buffer.put((byte) ARGB.red(argb)).put((byte) ARGB.green(argb)).put((byte) ARGB.blue(argb)).put((byte) code);

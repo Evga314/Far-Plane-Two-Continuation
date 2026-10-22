@@ -195,13 +195,21 @@ final class DetailGenerator {
             ChunkSummary summary;
             LevelChunk chunk = this.loaded.get(key);
             if (chunk != null) {
+                long start = ServerPerf.ON ? System.nanoTime() : 0L;
                 summary = ChunkSummary.live(chunk, this.minY, this.maxY);
+                if (ServerPerf.ON) {
+                    ServerPerf.DETAIL_LIVE.add(System.nanoTime() - start);
+                }
             } else if (this.saved != null) {
                 ChunkSummaryCache.Lookup cached = this.saved.get(this.dimension, key);
                 if (cached != null) {
                     summary = cached.summary();
                 } else {
+                    long start = ServerPerf.ON ? System.nanoTime() : 0L;
                     summary = this.readSaved(chunkX, chunkZ);
+                    if (ServerPerf.ON) {
+                        ServerPerf.DETAIL_SAVED.add(System.nanoTime() - start);
+                    }
                     this.saved.put(this.dimension, key, summary);
                 }
             } else {
@@ -231,7 +239,10 @@ final class DetailGenerator {
                 return;
             }
             try {
+                long start = ServerPerf.ON ? System.nanoTime() : 0L;
                 this.summaries.putAll(this.virtual.chunks(this.level, missing));
+                if (ServerPerf.ON) {
+                    ServerPerf.DETAIL_VIRTUAL.add(System.nanoTime() - start);}
             } catch (RuntimeException e) {
                 LOGGER.debug("Could not make virtual chunks for {}", pos, e);
             }

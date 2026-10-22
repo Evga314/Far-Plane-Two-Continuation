@@ -16,6 +16,9 @@ final class ServerPerf {
 
     static final Kind ROUGH = new Kind("rough tiles");
     static final Kind DETAIL = new Kind("detail tiles");
+    static final Kind DETAIL_LIVE = new Kind("detail live summaries");
+    static final Kind DETAIL_SAVED = new Kind("detail saved summaries");
+    static final Kind DETAIL_VIRTUAL = new Kind("detail virtual fetch");
     static final Kind SAVED_CHUNKS = new Kind("saved chunks read");
     static final Kind VIRTUAL_REGIONS = new Kind("virtual areas made");
     static final AtomicLong VIRTUAL_CHUNKS = new AtomicLong();
@@ -39,7 +42,7 @@ final class ServerPerf {
     static void summary(double serverTickMs, int roughQueued, int detailQueued) {
         StringBuilder line = new StringBuilder(256);
         boolean any = false;
-        for (Kind kind : new Kind[] {ROUGH, ROUGH_NEAR, ROUGH_ESTIMATED, ROUGH_EXACT, ICEBERGS, DETAIL, SAVED_CHUNKS, VIRTUAL_REGIONS}) {
+        for (Kind kind : new Kind[] {ROUGH, ROUGH_NEAR, ROUGH_ESTIMATED, ROUGH_EXACT, ICEBERGS, DETAIL, DETAIL_LIVE, DETAIL_SAVED, DETAIL_VIRTUAL, SAVED_CHUNKS, VIRTUAL_REGIONS}) {
             any |= kind.append(line);
         }
         line.append(" | surface searches ").append(SURFACE_SEARCHES.getAndSet(0L));

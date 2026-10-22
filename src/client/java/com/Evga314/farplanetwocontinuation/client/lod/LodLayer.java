@@ -48,6 +48,7 @@ abstract class LodLayer {
     private static final int UPLOAD_PART_BYTES = 256 * 1024;
 
     private final String name;
+    private final boolean detail;
     private final Executor meshExecutor;
     final Long2ObjectOpenHashMap<TileMesh> meshes = new Long2ObjectOpenHashMap<>();
     private final Long2LongOpenHashMap pending = new Long2LongOpenHashMap();
@@ -78,6 +79,7 @@ abstract class LodLayer {
 
     LodLayer(String name, Executor meshExecutor) {
         this.name = name;
+        this.detail = "detail".equals(name);
         this.meshExecutor = meshExecutor;
     }
 
@@ -259,7 +261,7 @@ abstract class LodLayer {
                     long start = PerfLog.ON ? System.nanoTime() : 0L;
                     this.built.add(work.run(buildEpoch));
                     if (PerfLog.ON) {
-                        PerfLog.meshBuilt(System.nanoTime() - start);
+                        PerfLog.meshBuilt(this.detail, System.nanoTime() - start);
                     }
                 } catch (Exception e) {
                     LOGGER.debug("Dropping bad {} tile {}", this.name, TilePos.unpack(key), e);

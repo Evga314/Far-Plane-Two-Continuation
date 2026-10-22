@@ -106,11 +106,13 @@ public final class PerfLog {
     private static long occlusionCheckedAt;
     private static int ticks;
     private static @Nullable Map<String, String> lastSettings;
-    // Mesh builder threads.
-    private static final AtomicLong meshNs = new AtomicLong();
-    private static final AtomicLong meshes = new AtomicLong();
-    private static final AtomicLong meshNsMax = new AtomicLong();
+    // Mesh builder threads, by layer: 0 = rough, 1 = detail.
+    // RU: ядра меш билдера, 0 - дальний, 1 - детальный
+    private static final AtomicLong[] meshNs = {new AtomicLong(), new AtomicLong()};
+    private static final AtomicLong[] meshes = {new AtomicLong(), new AtomicLong()};
+    private static final AtomicLong[] meshNsMax = {new AtomicLong(), new AtomicLong()};
     // CPU time of every thread at the last summary.
+    // RU: процессорное время каждого ядра в последней сводке.
     private static final Map<Long, Long> threadCpu = new HashMap<>();
 
     private PerfLog() {
@@ -232,10 +234,11 @@ public final class PerfLog {
         horizonNsMax = Math.max(horizonNsMax, nanos);
     }
 
-    public static void meshBuilt(long nanos) {
-        meshes.incrementAndGet();
-        meshNs.addAndGet(nanos);
-        meshNsMax.accumulateAndGet(nanos, Math::max);
+    public static void meshBuilt(boolean detail, long nanos) {
+        int index = detail ? 1 : 0;
+        meshes[index].incrementAndGet();
+        meshNs[index].addAndGet(nanos);
+        meshNsMax[index].accumulateAndGet(nanos, Math::max);
     }
 
     /** GPU timestamp at the start ({@code end} false) or end of the LOD pass. */
@@ -358,9 +361,14 @@ public final class PerfLog {
             tickPhaseNs[phase] = 0L;
         }
         line.append(")");
-        long built = meshes.getAndSet(0L);
-        line.append(String.format(Locale.ROOT, " | meshes built %d, avg %.1f max %.1f ms",
-            built, built == 0 ? 0.0 : meshNs.getAndSet(0L) / 1e6 / built, meshNsMax.getAndSet(0L) / 1e6));
+        String[] meshKinds = {"rough", "detail"};
+        for (int index = 0; index < 2; index++) {
+            long built = meshes[index].getAndSet(0L);
+            long nanos = meshNs[index].getAndSet(0L);
+            long max = meshNsMax[index].getAndSet(0L);
+            line.append(String.format(Locale.ROOT, " | %s meshes %d, avg %.1f max %.1f ms",
+                    meshKinds[index], built, built == 0 ? 0.0 : nanos / 1e6 / built, max / 1e6));
+        }
         Runtime runtime = Runtime.getRuntime();
         line.append(String.format(Locale.ROOT, " | gc %d (%d ms), heap %d/%d MB",
             lastGcCount - summaryGcCount, lastGcTime - summaryGcTime, (runtime.totalMemory() - runtime.freeMemory()) >> 20, runtime.maxMemory() >> 20));

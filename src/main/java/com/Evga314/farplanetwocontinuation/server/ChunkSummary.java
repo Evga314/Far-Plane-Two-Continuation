@@ -344,13 +344,13 @@ public final class ChunkSummary {
         int plant = 0;
         for (int i = 0; i < count ; i++) {
             int block = Short.toUnsignedInt(this.segBlocks[offset + i]);
-            if (block == 0){
-                break;
-            }
-            Look look = look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
             if (block == 0) {
                 plant = 0;
                 continue;
+            }
+            Look look = look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+            if (look.plant == 0) {
+                break;
             }
             plant = block;
         }

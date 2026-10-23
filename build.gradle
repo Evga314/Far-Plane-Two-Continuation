@@ -61,8 +61,9 @@ dependencies {
 
     // Optional: only used to show the settings button in Mod Menu when it is installed.
     clientCompileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
-    // Optional: only used to add the settings to Sodium's video settings when it is installed.
+    // Now sodium is required
     clientCompileOnly "maven.modrinth:sodium:${project.sodium_version}"
+    clientRuntimeOnly "maven.modrinth:sodium:${project.sodium_version}"
 }
 
 processResources {

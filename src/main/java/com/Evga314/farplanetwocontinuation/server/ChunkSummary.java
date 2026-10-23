@@ -152,62 +152,77 @@ public final class ChunkSummary {
     /** Every block the summary refers to, as raw ids, for building the palette of a file. */
     void collectBlocks(IntConsumer output) {
         for (int column = 0; column < 256; column++) {
-            int count = Math.max(0, this.ensureCount(column));
-            for (int run = 0; run < count; run++) {
-                output.accept(Short.toUnsignedInt(this.blocks[column * RUNS + run]));
-                output.accept(Short.toUnsignedInt(this.sides[column * RUNS + run]));
-            }
-            output.accept(Short.toUnsignedInt(this.plants[column]));
+            this.ensureCount(column);
+        }
+        for (int i = 0; i < this.segTotal; i++) {
+            output.accept(Short.toUnsignedInt(this.segBlocks[i]));
         }
     }
 
     /** Writes a fully scanned summary; biomes and blocks are written as indices into the palettes of the file. */
     void write(DataOutputStream out, Object2IntMap<Holder<Biome>> biomePalette, Int2IntMap blockPalette) throws IOException {
         for (int column = 0; column < 256; column++) {
-            int count = Math.max(0, this.ensureCount(column));
-            out.writeByte(count);
-            for (int run = 0; run < count; run++) {
-                int slot = column * RUNS + run;
-                out.writeShort(this.tops[slot]);
-                out.writeShort(this.bottoms[slot]);
-                out.writeShort(blockPalette.get(Short.toUnsignedInt(this.blocks[slot])));
-                out.writeShort(blockPalette.get(Short.toUnsignedInt(this.sides[slot])));
-                out.writeByte(this.heights[slot]);
-            }
-            out.writeShort(blockPalette.get(Short.toUnsignedInt(this.plants[column])));
+            this.ensureCount(column);
+        }
+        out.writeInt(this.segTotal);
+        for (int column = 0; column < 256; column++) {
+            out.writeByte(Math.max(0, this.segCounts[column]));
+            out.writeShort(this.segOffsets[column]);
+            out.writeByte(this.topFraction[column]);
             Holder<Biome> biome = this.biomes[column];
             out.writeShort(biome == null ? -1 : biomePalette.getOrDefault(biome, -1));
+        }
+        for (int i = 0; i < this.segTotal; i++) {
+            out.writeShort(blockPalette.get(Short.toUnsignedInt(this.segBlocks[i])));
+            out.writeShort(this.segHeights[i]);
         }
     }
 
     /** Reads what {@link #write} wrote, with blocks as raw ids of this server. Values are checked, since the file may be damaged. */
     static ChunkSummary read(DataInputStream in, List<Holder<Biome>> biomePalette, int[] blockPalette, int minY, int maxY) throws IOException {
         ChunkSummary summary = new ChunkSummary(minY, maxY);
+        int total = in.readInt();
+        if (total < 0 || total > 256 * SEGMENT_CAP) {
+            throw new IOException("Bad segment total " + total);
+        }
+        summary.segBlocks = new short[Math.max(total, 1)];
+        summary.segHeights = new short[Math.max(total, 1)];
+        int sum = 0;
         for (int column = 0; column < 256; column++) {
             int count = in.readUnsignedByte();
-            if (count > RUNS) {
-                throw new IOException("Bad run count " + count);
+            if (count > SEGMENT_CAP) {
+                throw new IOException("Bad segment count " + count);
             }
-            summary.counts[column] = (byte) count;
-            for (int run = 0; run < count; run++) {
-                int slot = column * RUNS + run;
-                summary.tops[slot] = in.readShort();
-                summary.bottoms[slot] = in.readShort();
-                summary.blocks[slot] = (short) block(blockPalette, in.readUnsignedShort());
-                summary.sides[slot] = (short) block(blockPalette, in.readUnsignedShort());
-                int height = in.readByte();
-                if (height < 1 || height > 16) {
-                    throw new IOException("Bad block height " + height);
-                }
-                summary.heights[slot] = (byte) height;
+            summary.segCounts[column] = (byte) count;
+            sum += count;
+            int offset = in.readUnsignedShort();
+            if (offset > total) {
+                throw new IOException("Bad segment offset " + offset);
             }
-            summary.plants[column] = (short) block(blockPalette, in.readUnsignedShort());
+            summary.segOffsets[column] = (short) offset;
+            int fraction = in.readByte();
+            if (fraction < 1 || fraction > 16) {
+                throw new IOException("Bad top fraction " + fraction);
+            }
+            summary.topFraction[column] = (byte) fraction;
             int biome = in.readShort();
             if (biome >= biomePalette.size()) {
                 throw new IOException("Bad biome index " + biome);
             }
             summary.biomes[column] = biome < 0 ? null : biomePalette.get(biome);
         }
+        if (sum != total) {
+            throw new IOException("Segment counts " + sum + " do not add up to total " + total);
+        }
+        for (int i = 0; i < total; i++) {
+            summary.segBlocks[i] = (short) block(blockPalette, in.readUnsignedShort());
+            int height = in.readUnsignedShort();
+            if (height < 1) {
+                throw new IOException("Bad segment height " + height);
+            }
+            summary.segHeights[i] = (short) height;
+        }
+        summary.segTotal = total;
         return summary;
     }
 
@@ -219,33 +234,147 @@ public final class ChunkSummary {
     }
 
     private int ensureCount(int column) {
-        if (this.counts[column] == NOT_SCANNED) {
+        if (this.segCounts[column] == NOT_SCANNED) {
             this.scan(column);
         }
-        return this.counts[column];
+        return this.segCounts[column];
     }
 
     /** Exclusive top of the highest visible block, or the bottom of the world for an empty column. */
     int top(int x, int z) {
         int column = this.ensure(x, z);
-        return this.counts[column] > 0 ? this.tops[column * RUNS] : this.minY;
+        int count = this.segCounts[column];
+        int offset = this.segOffsets[column];
+        int top = this.minY;
+        for (int i = 0; i < count; i++) {
+            top += this.segHeights[offset + i];
+        }
+        for (int i = 0; i < count; i++) {
+            int block = Short.toUnsignedInt(this.segBlocks[offset + i]);
+            if (block == 0) {
+                top -= this.segHeights[offset + i];
+                continue;
+            }
+            Look look = look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+            if (look.plant != 0) {
+                top -= this.segHeights[offset + i];
+                continue;
+            }
+            return top;
+        }
+        return this.minY;
     }
 
     /** Copies the runs of a column, highest first, with blocks as raw ids. Returns how many there are. */
     int runs(int x, int z, short[] tops, short[] bottoms, short[] blocks, short[] sides, byte[] heights, int base) {
         int column = this.ensure(x, z);
-        int count = this.counts[column];
-        System.arraycopy(this.tops, column * RUNS, tops, base, count);
-        System.arraycopy(this.bottoms, column * RUNS, bottoms, base, count);
-        System.arraycopy(this.blocks, column * RUNS, blocks, base, count);
-        System.arraycopy(this.sides, column * RUNS, sides, base, count);
-        System.arraycopy(this.heights, column * RUNS, heights, base, count);
-        return count;
+        int count = this.segCounts[column];
+        int offset = this.segOffsets[column];
+        int top = this.minY;
+        for (int i = 0; i < count; i++) {
+            top += this.segHeights[offset + i];
+        }
+        int runs = 0;
+        int segTop = top;
+        boolean inRun = false;
+        int runTop = 0, runBottom = 0, runBlock = 0, runFirst = 0, runLast = 0;
+        boolean runClear = false, runLiquid = false;
+        for (int i = 0; i < count; i++) {
+            int block = Short.toUnsignedInt(this.segBlocks[offset + i]);
+            int segBottom = segTop - this.segHeights[offset + i];
+            Look look = block == 0 ? Look.NOTHING
+                    : look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+            boolean gap = block == 0 || look.plant != 0;
+            if (gap) {
+                if (inRun) {
+                    emitRun(tops, bottoms, blocks, sides, heights, base, runs, column, offset,
+                            runFirst, runLast, runTop, runBottom, runBlock);
+                    runs++;
+                    inRun = false;
+                }
+            } else if (!inRun) {
+                if (runs == 3) {
+                    bottoms[base + 2] = (short) this.minY;
+                    return 3;
+                }
+                inRun = true;
+                runTop = segTop;
+                runBlock = block;
+                runClear = look.clear;
+                runLiquid = look.liquid;
+                runFirst = i;
+                runBottom = segBottom;
+                runLast = i;
+            } else if (look.clear != runClear || look.liquid != runLiquid) {
+                emitRun(tops, bottoms, blocks, sides, heights, base, runs, column, offset,
+                        runFirst, runLast, runTop, runBottom, runBlock);
+                runs++;
+                if (runs == 3) {
+                    bottoms[base + 2] = (short) this.minY;
+                    return 3;
+                }
+                runTop = segTop;
+                runBlock = block;
+                runClear = look.clear;
+                runLiquid = look.liquid;
+                runFirst = i;
+                runBottom = segBottom;
+                runLast = i;
+            } else {
+                runBottom = segBottom;
+                runLast = i;
+            }
+            segTop = segBottom;
+        }
+        if (inRun) {
+            emitRun(tops, bottoms, blocks, sides, heights, base, runs, column, offset,
+                    runFirst, runLast, runTop, runBottom, runBlock);
+            runs++;
+        }
+        return runs;
+    }
+
+    /** Writes one synthesized run into the caller's arrays at base + run. / Записывает один синтезированный пробег в массивы вызывающего по адресу base + run. */
+    private void emitRun(short[] tops, short[] bottoms, short[] blocks, short[] sides, byte[] heights,
+                         int base, int run, int column, int offset, int runFirst, int runLast,
+                         int runTop, int runBottom, int runBlock) {
+        tops[base + run] = (short) runTop;
+        bottoms[base + run] = (short) runBottom;
+        blocks[base + run] = (short) runBlock;
+        heights[base + run] = run == 0 ? this.topFraction[column]
+                : (byte) look(BuiltInRegistries.BLOCK.byId(runBlock).defaultBlockState()).height;
+        int target = Math.max(runTop - SIDE_DEPTH, runBottom + 1);
+        int segTop = runTop;
+        int side = runBlock;
+        for (int i = runFirst; i <= runLast; i++) {
+            int segBottom = segTop - this.segHeights[offset + i];
+            if (target > segBottom) {
+                side = Short.toUnsignedInt(this.segBlocks[offset + i]);
+                break;
+            }
+            segTop = segBottom;
+        }
+        sides[base + run] = (short) side;
     }
 
     /** Raw id of the plant on top of a column, 0 for none. */
     int plant(int x, int z) {
-        return Short.toUnsignedInt(this.plants[this.ensure(x, z)]);
+        int column = this.ensure(x, z);
+        int count = this.segCounts[column];
+        int offset = this.segOffsets[column];
+        int plant = 0;
+        for (int i = 0; i < count ; i++) {
+            int block = Short.toUnsignedInt(this.segBlocks[offset + i]);
+            if (block == 0){
+                break;
+            }
+            Look look = look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+            if (look.plant == 0) {
+                break;
+            }
+            plant = block;
+        }
+        return plant;
     }
 
     @Nullable Holder<Biome> biome(int x, int z) {

@@ -46,7 +46,6 @@ public final class ChunkSummary {
     private static final int SEGMENT_CAP = 64;
 
     private static final byte NOT_SCANNED = -1;
-    private static final int RUNS = DetailData.MAX_RUNS;
     /**
      * Depth below the top of a run where the color of its sides is taken. Cliffs are grass on top and stone below, so walls get the
      * color found a few blocks down; runs too short for that keep the top color.
@@ -65,26 +64,6 @@ public final class ChunkSummary {
     private static final Set<Block> NOT_PLANTS = Set.of(Blocks.SNOW, Blocks.POWDER_SNOW, Blocks.SUGAR_CANE,
         Blocks.TWISTING_VINES, Blocks.TWISTING_VINES_PLANT, Blocks.WEEPING_VINES, Blocks.WEEPING_VINES_PLANT,
         Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT, Blocks.BIG_DRIPLEAF_STEM);
-    /** Thickest a run floating on a liquid can be (ice, lily pads), see scan; ground over a flooded cave is thicker. */
-    private static final int FLOATING_THICKNESS = 2;
-    /**
-     * A run at least this thick that is neither liquid nor seen through counts as the ground when runs are joined: structure floors,
-     * roofs and canopies are thinner.
-     */
-    private static final int GROUND_THICKNESS = 6;
-    /** The runs of the column being scanned, kept per thread instead of made for each of the many columns. */
-    private static final ThreadLocal<Scratch> SCRATCH = ThreadLocal.withInitial(Scratch::new);
-
-    private static final class Scratch {
-        final int[] tops = new int[RUNS + 1];
-        final int[] bottoms = new int[RUNS + 1];
-        final int[] blocks = new int[RUNS + 1];
-        final int[] sides = new int[RUNS + 1];
-        final int[] heights = new int[RUNS + 1];
-        final boolean[] clear = new boolean[RUNS + 1];
-        final boolean[] liquid = new boolean[RUNS + 1];
-    }
-
     /** What a block state means for the summary, worked out once per state. */
     private static final Map<BlockState, Look> LOOKS = new ConcurrentHashMap<>();
     /** How many segments each column has; NOT_SCANNED until the column is scanned. */
@@ -369,8 +348,9 @@ public final class ChunkSummary {
                 break;
             }
             Look look = look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
-            if (look.plant == 0) {
-                break;
+            if (block == 0) {
+                plant = 0;
+                continue;
             }
             plant = block;
         }

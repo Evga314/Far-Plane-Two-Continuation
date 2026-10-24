@@ -1,35 +1,28 @@
 package com.Evga314.farplanetwocontinuation.server;
 
+import com.Evga314.farplanetwocontinuation.tile.BlockLook;
+import com.Evga314.farplanetwocontinuation.tile.BlockLook.Look;
 import com.Evga314.farplanetwocontinuation.tile.DetailData;
 import it.unimi.dsi.fastutil.ints.Int2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Consumer;
-import java.util.function.IntConsumer;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.util.Mth;
 import net.minecraft.util.SimpleBitStorage;
-import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.biome.Biome;
-import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.Heightmap;
-import net.minecraft.world.level.material.FluidState;
-import net.minecraft.world.phys.shapes.VoxelShape;
 import org.jspecify.annotations.Nullable;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
 /**
  * What a detailed tile needs from one chunk: for each of its 256 columns up to {@link DetailData#MAX_RUNS} runs of visible blocks
@@ -52,20 +45,6 @@ public final class ChunkSummary {
      */
     private static final int SIDE_DEPTH = 5;
 
-    /** Plants and other small things without collision are drawn on the ground instead of as blocks, up from this height. */
-    private static final int PLANT_MIN_HEIGHT = 4;
-    /**
-     * Blocks with no collision that are not plants. Snow (layers and powder) is cover. What grows in a stack or hangs in a
-     * curtain - sugar cane, the three vines, the stem of a big dripleaf - would lose everything past its lowest block as the
-     * plant of a column, which is drawn one block high standing on the highest run, and hanging vines are dropped entirely;
-     * as blocks they form runs of their real height. Named, not by shape: in 26.3 kelp plants and double plants have a
-     * full-block outline but are plants.
-     */
-    private static final Set<Block> NOT_PLANTS = Set.of(Blocks.SNOW, Blocks.POWDER_SNOW, Blocks.SUGAR_CANE,
-        Blocks.TWISTING_VINES, Blocks.TWISTING_VINES_PLANT, Blocks.WEEPING_VINES, Blocks.WEEPING_VINES_PLANT,
-        Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT, Blocks.BIG_DRIPLEAF_STEM);
-    /** What a block state means for the summary, worked out once per state. */
-    private static final Map<BlockState, Look> LOOKS = new ConcurrentHashMap<>();
     /** How many segments each column has; NOT_SCANNED until the column is scanned. */
     private final byte[] segCounts = new byte[256];
 
@@ -234,8 +213,8 @@ public final class ChunkSummary {
                 top -= this.segHeights[offset + i];
                 continue;
             }
-            Look look = look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
-            if (look.plant != 0) {
+            Look look = BlockLook.look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+            if (look.plant() != 0) {
                 top -= this.segHeights[offset + i];
                 continue;
             }
@@ -262,8 +241,8 @@ public final class ChunkSummary {
             int block = Short.toUnsignedInt(this.segBlocks[offset + i]);
             int segBottom = segTop - this.segHeights[offset + i];
             Look look = block == 0 ? Look.NOTHING
-                    : look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
-            boolean gap = block == 0 || look.plant != 0;
+                    : BlockLook.look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+            boolean gap = block == 0 || look.plant() != 0;
             if (gap) {
                 if (inRun) {
                     emitRun(tops, bottoms, blocks, sides, heights, base, runs, column, offset,
@@ -279,12 +258,12 @@ public final class ChunkSummary {
                 inRun = true;
                 runTop = segTop;
                 runBlock = block;
-                runClear = look.clear;
-                runLiquid = look.liquid;
+                runClear = look.clear();
+                runLiquid = look.liquid();
                 runFirst = i;
                 runBottom = segBottom;
                 runLast = i;
-            } else if (look.clear != runClear || look.liquid != runLiquid) {
+            } else if (look.clear() != runClear || look.liquid() != runLiquid) {
                 emitRun(tops, bottoms, blocks, sides, heights, base, runs, column, offset,
                         runFirst, runLast, runTop, runBottom, runBlock);
                 runs++;
@@ -294,8 +273,8 @@ public final class ChunkSummary {
                 }
                 runTop = segTop;
                 runBlock = block;
-                runClear = look.clear;
-                runLiquid = look.liquid;
+                runClear = look.clear();
+                runLiquid = look.liquid();
                 runFirst = i;
                 runBottom = segBottom;
                 runLast = i;
@@ -321,7 +300,7 @@ public final class ChunkSummary {
         bottoms[base + run] = (short) runBottom;
         blocks[base + run] = (short) runBlock;
         heights[base + run] = run == 0 ? this.topFraction[column]
-                : (byte) look(BuiltInRegistries.BLOCK.byId(runBlock).defaultBlockState()).height;
+                : (byte) BlockLook.look(BuiltInRegistries.BLOCK.byId(runBlock).defaultBlockState()).height();
         int target = Math.max(runTop - SIDE_DEPTH, runBottom + 1);
         int segTop = runTop;
         int side = runBlock;
@@ -348,8 +327,8 @@ public final class ChunkSummary {
                 plant = 0;
                 continue;
             }
-            Look look = look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
-            if (look.plant == 0) {
+            Look look = BlockLook.look(BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+            if (look.plant() == 0) {
                 break;
             }
             plant = block;
@@ -391,10 +370,10 @@ public final class ChunkSummary {
         int openBlock = -1;   // block of the segment being grown; -1 = no segment open yet / блок открытого сегмента, -1 = открытого пока нет
         int openHeight = 0;
         while (y >= limit) {
-            Look look = look(source.state(x, y, z));
-            int block = look.block >= 0 ? look.block : look.plant;
-            if (!topFound && look.block != -1) {
-                this.topFraction[column] = (byte) look.height;
+            Look look = BlockLook.look(source.state(x, y, z));
+            int block = look.block() >= 0 ? look.block() : look.plant();
+            if (!topFound && look.block() != -1) {
+                this.topFraction[column] = (byte) look.height();
                 surfaceY = y;
                 topFound = true;
             }
@@ -440,71 +419,6 @@ public final class ChunkSummary {
         this.segBlocks[this.segTotal] = (short) block;
         this.segHeights[this.segTotal] = (short) height;
         this.segTotal++;
-    }
-
-
-    /**
-     * What a block state looks like from far away. Air and blocks invisible on maps (glass, barriers, light) are not drawn. Plants,
-     * flowers, torches and other small things without collision are no blocks either, but are remembered as the plant on the ground;
-     * those growing under water (kelp, seagrass) count as the water around them. Everything else is a block, as high as its shape.
-     */
-    private static Look look(BlockState state) {
-        Look look = LOOKS.get(state);
-        if (look == null) {
-            look = computeLook(state);
-            if (LOOKS.size() < 1 << 16) {
-                LOOKS.put(state, look);
-            }
-        }
-        return look;
-    }
-
-    private static Look computeLook(BlockState state) {
-        if (state.isAir()) {
-            return Look.NOTHING;
-        }
-        // Blocks that show nothing but their liquid (a bubble column over magma) are that liquid: as blocks of their own they would
-        // stand as pillars in the water.
-        if (state.getRenderShape() == net.minecraft.world.level.block.RenderShape.INVISIBLE && !state.getFluidState().isEmpty()) {
-            state = state.getFluidState().createLegacyBlock();
-        }
-        int id = BuiltInRegistries.BLOCK.getId(state.getBlock());
-        int height = 16;
-        boolean plant = false;
-        try {
-            VoxelShape outline = state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
-            if (!outline.isEmpty()) {
-                height = Mth.clamp((int) Math.ceil(outline.max(Direction.Axis.Y) * 16.0 - 1.0E-4), 1, 16);
-            }
-            // What has no collision is a plant, except the blocks in NOT_PLANTS: snow layers from three up pass the
-            // height test below and would be drawn as crossed quads instead of the box they are.
-            plant = !NOT_PLANTS.contains(state.getBlock())
-                && state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty() && !outline.isEmpty() && height > PLANT_MIN_HEIGHT;
-        } catch (RuntimeException e) {
-            // Some modded blocks need a real world for their shape; they count as full blocks.
-            height = 16;
-        }
-        FluidState fluid = state.getFluidState();
-        if (plant) {
-            if (!fluid.isEmpty()) {
-                return new Look(BuiltInRegistries.BLOCK.getId(fluid.createLegacyBlock().getBlock()), 16, 0, true, true);
-            }
-            return new Look(-1, 16, id, false, false);
-        }
-        if (state.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).id == 0) {
-            return Look.NOTHING;
-        }
-        boolean liquid = !fluid.isEmpty() && fluid.createLegacyBlock().getBlock() == state.getBlock();
-        return new Look(id, height, 0, liquid || !state.canOcclude(), liquid);
-    }
-
-    /**
-     * {@code block}: raw id when drawn as a block, -1 when not; {@code plant}: raw id when it is a plant on the ground, else 0;
-     * {@code clear}: seen through, so the ground under it stays a run of its own: water, lava, plants growing in them, leaves and
-     * other blocks that do not hide what is behind them; {@code liquid}: a liquid, or a plant growing in one.
-     */
-    private record Look(int block, int height, int plant, boolean clear, boolean liquid) {
-        static final Look NOTHING = new Look(-1, 16, 0, false, false);
     }
 
     /** Read-only access to the sections of one chunk, either a live chunk or one parsed from disk. */

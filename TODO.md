@@ -11,6 +11,10 @@
 - **Сейчас** - можно браться уже сейчас, ничего не мешает.
 - **Потом** - ждёт чего-то: другого пункта
 
+по оптимизации процессорной части - более умное использование потоков. при свободных ресурсах цпу выделять весь остаток гармонично на дальний/детальный ландшафт (по какой нибудь формуле) Чтобы дальний ландшафт не грузился долго. также улучшить  приоритеты для дальнего и детального ландшафта. настроить оптимальным вариантом "из коробки", в будущем вынести в настройки. старый вариант с костылем в зависимости от скорости игрока вообще может быть стоит убрать если он не будет актуален
+
+
+
 баг - вообще не работает настройка для выставления дальности тумана. Подсказки от пользователей: so for the fog to work right had to use smooth skies with sodium extra and setting the fog to either cylindrical or radial and set the fog distance to the amount of chunks you want since it's limited by default use bobby change change the max chunks to whatever number and for the fog in sodium extra i set the chunks to 96 and start to 0%.
 and also using the custom fog setup like what i said above it only works on the distant terrain not the real terrain for some reason. у пользователя стоит sodium extra with smooth skies, и эта связка работает некорректно. кастомный туман рисуется только дла дальнего ландшафта, исправить. сделать общее меню для настроек тумана. 
 

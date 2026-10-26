@@ -14,7 +14,7 @@
 
 But... wait. I have an idea to add underground generation for the far terrain too. Just generate caves only if you are already underground, and only in about ~32 chunks around the player
 
-
+брать для генерации виртуальных чанков кеш из ванильных сгенерированных чанков
 
 
 пещеры??? в детальной зоне. (не уверен, что стоит добавлять, хотя с новым генератором детального это вполне возможно)

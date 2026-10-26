@@ -6,7 +6,7 @@ import java.util.concurrent.locks.LockSupport;
  * Lets the background work of the mod make room for the game's frames. When the client sees frames running late, background threads
  * (tile generation, virtual chunks, mesh building) pause for a moment at their next checkpoint for a short while, so the render
  * thread finds a free core. On phones, where every core is busy and the render thread otherwise waits for one, this is what keeps
- * input responsive. With nothing late, a checkpoint costs one volatile read.
+ * input responsive. With nothing late, a checkpoint costs a clock read.
  * <p>
  * How much it yields depends on the urgency of loading: walking around, terrain can come in slowly and frames come first; flying
  * fast, terrain has to keep up and background work does not yield at all.
@@ -14,8 +14,18 @@ import java.util.concurrent.locks.LockSupport;
 public final class WorkThrottle {
     /** How long background work keeps yielding after a late frame. */
     private static final long HOLD_NS = 250_000_000L;
-    /** The pause at each checkpoint while frames are late; work goes on between checkpoints, at a lower pace. */
+    /** The pause at a checkpoint of a thread that is no {@link Worker}, while frames are late. */
     private static final long PAUSE_NS = 3_000_000L;
+    /**
+     * Share of the time a {@link Worker} pauses while frames are late and loading is not urgent: it works for a while, then pauses
+     * for this share of it. Pauses go by the time worked, not by checkpoints, which lie far apart in some work and close together in
+     * other.
+     */
+    private static final float PAUSE_SHARE = 0.3F;
+    /** A worker pauses only after working at least this long, so the pauses are not too short to give the frame a core. */
+    private static final long SLICE_NS = 2_000_000L;
+    /** The longest single pause, so the work goes on soon enough. */
+    private static final long MAX_PAUSE_NS = 3_000_000L;
 
     private static volatile long slowUntil;
     /** 0: smooth frames first, 1: load as fast as possible; set by the client from the player's speed and the settings. */
@@ -44,6 +54,10 @@ public final class WorkThrottle {
      */
     public static final class Worker extends Thread {
         private volatile boolean cancelled;
+        /** Time this thread spent pausing for frames so far; only read and written by the thread itself. */
+        private long pausedNanos;
+        /** When this thread last paused, or frames were last on time: the time worked since is what the next pause depends on. */
+        private long workingSince;
 
         public Worker(Runnable task, String name) {
             super(task, name);
@@ -67,14 +81,34 @@ public final class WorkThrottle {
      * {@link Worker} ends here with {@link Cancelled}.
      */
     public static void yieldToFrames() {
-        if (Thread.currentThread() instanceof Worker worker && worker.cancelled) {
+        Worker worker = Thread.currentThread() instanceof Worker thread ? thread : null;
+        if (worker != null && worker.cancelled) {
             throw new Cancelled();
         }
-        if (System.nanoTime() - slowUntil < 0L) {
-            long pause = (long) (PAUSE_NS * (1.0F - urgency));
-            if (pause > 0L) {
-                LockSupport.parkNanos(pause);
+        long now = System.nanoTime();
+        float share = PAUSE_SHARE * (1.0F - urgency);
+        if (now - slowUntil >= 0L || share <= 0.0F) {
+            if (worker != null) {
+                worker.workingSince = now;
             }
+            return;
         }
+        if (worker == null) {
+            LockSupport.parkNanos((long) (PAUSE_NS * (1.0F - urgency)));
+            return;
+        }
+        long worked = now - worker.workingSince;
+        if (worked < SLICE_NS) {
+            return;
+        }
+        LockSupport.parkNanos(Math.min(MAX_PAUSE_NS, (long) (worked * share / (1.0F - share))));
+        long resumed = System.nanoTime();
+        worker.pausedNanos += resumed - now;
+        worker.workingSince = resumed;
+    }
+
+    /** Time the current thread spent pausing for frames so far, 0 on threads that are no {@link Worker}. */
+    public static long pausedNanos() {
+        return Thread.currentThread() instanceof Worker worker ? worker.pausedNanos : 0L;
     }
 }

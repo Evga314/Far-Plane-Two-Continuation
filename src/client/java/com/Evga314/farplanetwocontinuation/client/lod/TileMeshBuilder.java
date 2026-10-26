@@ -374,7 +374,7 @@ public final class TileMeshBuilder {
                     sparse[index] = trees.density() < SPARSE_TREES;
                     if (canopy > FOREST_EDGE) {
                         boolean snowy = TileColors.coldEnoughToSnow(biome.value(), worldX, (int) (height + canopy), worldZ, seaLevel, scratch);
-                        int leaves = ARGB.scaleRGB(Canopy.color(trees, biome, worldX, (int) (height + canopy), worldZ, snowy), landShade);
+                        int leaves = ARGB.scaleRGB(Canopy.color(trees, biome, worldX, (int) (height + canopy), worldZ, snowy, spacing), landShade);
                         // Coarse samples stand for trees and the ground between them. Mangroves over water turn it into tree tops.
                         colors[index] = spacing >= 16 && hasLand[index] ? ARGB.srgbLerp(trees.density(), colors[index], leaves) : leaves;
                         hasLand[index] = true;

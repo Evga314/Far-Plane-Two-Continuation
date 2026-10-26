@@ -124,6 +124,17 @@ public final class VirtualTerrain {
      * neighbours, so without this most chunks would be built two or three times. About 30 KB per chunk.
      */
     private static final int TERRAIN_CACHE_SIZE = 800;
+    /**
+     * Work of {@link #generate} for the performance log of the debug build: processor time of its stages, without the pauses for
+     * frames, and how many chunks needed terrain and how many of them found it in {@link #terrainCache}.
+     */
+    public static final boolean PERF = com.Evga314.farplanetwocontinuation.FarPlaneDebug.ENABLED;
+    public static final java.util.concurrent.atomic.AtomicLong PERF_PREPARE_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_DECORATE_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_BUILT = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_REUSED = new java.util.concurrent.atomic.AtomicLong();
+    private static final java.lang.management.ThreadMXBean THREADS = java.lang.management.ManagementFactory.getThreadMXBean();
     private static final EnumSet<Heightmap.Types> RESTORED_HEIGHTMAPS = EnumSet.of(
         Heightmap.Types.WORLD_SURFACE_WG, Heightmap.Types.OCEAN_FLOOR_WG, Heightmap.Types.MOTION_BLOCKING,
         Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Heightmap.Types.OCEAN_FLOOR, Heightmap.Types.WORLD_SURFACE
@@ -207,6 +218,7 @@ public final class VirtualTerrain {
         int sizeZ = depth + MARGIN * 2;
         int originX = minX - MARGIN;
         int originZ = minZ - MARGIN;
+        long cpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
         ProtoChunk[] area = new ProtoChunk[sizeX * sizeZ];
         int[] bands = this.surfaceBands(originX, originZ, sizeX, sizeZ);
         for (int z = 0; z < sizeZ; z++) {
@@ -224,6 +236,11 @@ public final class VirtualTerrain {
             }
         }
         Area chunks = new Area(this, originX, originZ, sizeX, sizeZ, area);
+        if (PERF) {
+            long now = THREADS.getCurrentThreadCpuTime();
+            PERF_PREPARE_NANOS.addAndGet(now - cpu);
+            cpu = now;
+        }
 
         for (int z = 1; z < sizeZ - 1; z++) {
             for (int x = 1; x < sizeX - 1; x++) {
@@ -232,15 +249,29 @@ public final class VirtualTerrain {
                 WorkThrottle.yieldToFrames();
                 this.addReferences(chunk);
                 if (!chunk.getPersistedStatus().isOrAfter(ChunkStatus.TERRAIN)) {
-                    this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1]);                    this.storeTerrain(chunk);
+                    this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1]);
+                    this.storeTerrain(chunk);
+                    if (PERF) {
+                        PERF_TERRAIN_BUILT.incrementAndGet();
+                    }
+                } else if (PERF) {
+                    PERF_TERRAIN_REUSED.incrementAndGet();
                 }
             }
+        }
+        if (PERF) {
+            long now = THREADS.getCurrentThreadCpuTime();
+            PERF_TERRAIN_NANOS.addAndGet(now - cpu);
+            cpu = now;
         }
         for (int z = 2; z < sizeZ - 2; z++) {
             for (int x = 2; x < sizeX - 2; x++) {
                 WorkThrottle.yieldToFrames();
                 this.decorate(chunks, area[x + z * sizeX]);
             }
+        }
+        if (PERF) {
+            PERF_DECORATE_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - cpu);
         }
 
         ProtoChunk[] result = new ProtoChunk[width * depth];

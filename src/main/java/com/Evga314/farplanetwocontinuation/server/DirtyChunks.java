@@ -17,6 +17,20 @@ public final class DirtyChunks {
     private DirtyChunks() {
     }
 
+    /** Block changes by kind, old to new, for the performance log of the debug build; see {@link #noteChange}. */
+    static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> CHANGES = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_CHANGE_KINDS = 4096;
+
+    /** Counts a block change by its blocks, in the debug build only. */
+    public static void noteChange(net.minecraft.world.level.block.Block from, net.minecraft.world.level.block.Block to) {
+        if (!com.Evga314.farplanetwocontinuation.FarPlaneDebug.ENABLED || CHANGES.size() >= MAX_CHANGE_KINDS) {
+            return;
+        }
+        String kind = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(from).getPath() + ">"
+            + net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(to).getPath();
+        CHANGES.computeIfAbsent(kind, k -> new java.util.concurrent.atomic.AtomicLong()).incrementAndGet();
+    }
+
     public static void mark(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
         synchronized (CHUNKS) {
             CHUNKS.computeIfAbsent(dimension, key -> new LongOpenHashSet()).add(ChunkPos.pack(chunkX, chunkZ));

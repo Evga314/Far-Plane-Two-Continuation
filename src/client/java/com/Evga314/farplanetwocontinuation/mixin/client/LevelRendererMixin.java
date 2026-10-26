@@ -52,9 +52,61 @@ abstract class LevelRendererMixin {
         if (!renderer.shouldRender(cameraState)) {
             return;
         }
+        if (LodRenderer.mainPassPrototype) {
+            // Prototype: buffers are written now, the tiles are drawn inside vanilla's main pass, see farplane$lodAfterOpaqueTerrain.
+            renderer.prepareMainPass(cameraState);
+            return;
+        }
         FramePass pass = frame.addPass("farplane_lod");
         ResourceHandle<RenderTarget> main = pass.readsAndWrites(this.targets.main);
         this.targets.main = main;
         pass.executes(() -> renderer.render(main.get(), cameraState, terrainFog));
+    }
+
+    @Shadow
+    @Final
+    private net.minecraft.client.renderer.state.level.LevelRenderState levelRenderState;
+
+    /**
+     * Prototype: the LOD terrain drawn inside vanilla's main pass, right after its opaque chunks and before entities, into the same
+     * depth buffer. Where vanilla drew a block in front, the LOD's fragments are rejected before they are shaded.
+     */
+    @Inject(
+        method = "executeSolid",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;executeSolid(Lcom/mojang/renderpearl/api/commands/RenderPass;)V"
+        )
+    )
+    private void farplane$lodAfterOpaqueTerrain(
+        net.minecraft.client.renderer.chunk.ChunkSectionsToRender chunks,
+        net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame featureFrame,
+        com.mojang.renderpearl.api.commands.RenderPass renderPass,
+        CallbackInfo ci
+    ) {
+        LodRenderer renderer = FarplanetwocontinuationClient.renderer();
+        CameraRenderState camera = this.levelRenderState.cameraRenderState;
+        if (renderer == null || !LodRenderer.mainPassPrototype) {
+            return;
+        }
+        renderer.renderInMainPass(renderPass, camera);
+    }
+
+    /**
+     * Prototype: the LOD water after vanilla's solid entities, before its translucent things and its own water. Both ways of
+     * transparency draw the solid things in this pass; with the improved one vanilla's water is blended over it later.
+     */
+    @Inject(method = "executeSolid", at = @At("TAIL"))
+    private void farplane$lodWater(
+        net.minecraft.client.renderer.chunk.ChunkSectionsToRender chunks,
+        net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame featureFrame,
+        com.mojang.renderpearl.api.commands.RenderPass renderPass,
+        CallbackInfo ci
+    ) {
+        LodRenderer renderer = FarplanetwocontinuationClient.renderer();
+        if (renderer == null || !LodRenderer.mainPassPrototype) {
+            return;
+        }
+        renderer.renderWaterInMainPass(renderPass);
     }
 }

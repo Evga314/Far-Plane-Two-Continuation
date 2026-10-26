@@ -34,6 +34,7 @@ public abstract class LevelChunkMixin {
             return;
         }
         if (old.getBlock() != state.getBlock()) {
+            DirtyChunks.noteChange(old.getBlock(), state.getBlock());
             DirtyChunks.mark(this.level.dimension(), pos.getX() >> 4, pos.getZ() >> 4);
         }
     }

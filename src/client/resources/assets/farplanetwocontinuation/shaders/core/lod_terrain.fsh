@@ -29,9 +29,10 @@ layout(location = 9) in float coastSide;
 
 #if defined(ROUGH) && !defined(NO_DISCARD)
 // The chunks around the camera vanilla draws: how far the camera is from the corner of the chunk in the middle (x and z, float bits),
-// how many chunks it reaches from the middle (below 0 none), how far vanilla draws above and below the camera (float bits), then per
-// chunk 1 where vanilla draws it, 2 where it does next to chunks it does not draw, 256 where detailed tiles do, and 512 more along
-// their edge. See LodManager.ChunkMask.
+// how many chunks it reaches from the middle (below 0 none), how far vanilla draws above and below the camera (float bits), the height
+// of the camera (float bits, see the vertex shader), then per chunk 1 where vanilla draws it, 2 where it does next to chunks it does
+// not draw, 256 where detailed tiles do, and 512 more along their edge, and from bit 16 the floor under their blocks. See
+// LodManager.ChunkMask.
 uniform isamplerBuffer ChunkMask;
 
 // Whose this fragment of the rough terrain is: 0 its own; 1 vanilla's, in chunks vanilla draws, as far above and below the camera as it
@@ -48,7 +49,7 @@ int leftToOthers(vec3 position) {
     if (chunk.x < 0 || chunk.y < 0 || chunk.x >= side || chunk.y >= side) {
         return 0;
     }
-    int value = texelFetch(ChunkMask, 4 + chunk.x + chunk.y * side).r;
+    int value = texelFetch(ChunkMask, 5 + chunk.x + chunk.y * side).r;
     if ((value & 256) != 0) {
         return (value & 512) != 0 ? 1 : 3;
     }
@@ -114,9 +115,16 @@ const float WATER_FADE_START = 0.7;
 const float ROUGH_WATER_SHADE = 0.85 * 0.92;
 #endif
 
-// Height of the vanilla sky disc above the camera. Everything closer than this angle to the horizon is drawn in the fog color by
-// vanilla, so distant terrain fades into the same color over the same angle instead of ending in a hard line under a pale band.
-const float SKY_DISC_HEIGHT = 16.0;
+// Under water with its fog off a wall in the color of that fog closes the view at the edge of the detailed tiles: TextureMat[3][0] is its
+// radius (0 without), [3][1] the water surface, [3][2] how much darker it gets with the camera deeper down, [0][1] the camera height.
+// Lower down it gets darker like the sea, and the terrain fades into it from WALL_FADE_START of the radius on. See LodRenderer.
+const float WALL_FADE_START = 0.7;
+const float WALL_DEEPEST = 0.2;
+const float WALL_DARKENING_DEPTH = 20.0;
+vec3 wallColor(float worldY) {
+    float depth = max(TextureMat[3][1] - worldY, 0.0);
+    return FogColor.rgb * TextureMat[3][2] * mix(WALL_DEEPEST, 1.0, exp(-depth / WALL_DARKENING_DEPTH));
+}
 
 #ifdef DEPTH_ONLY
 // ColorModulator: x = radius within which no depth is written, y = 1 for zero-to-one depth, z = inner cut, w = outer cut. TextureMat = vanilla
@@ -175,12 +183,16 @@ void main() {
 // TextureMat[0][0]: drop fragments closer than this (covered by detailed tiles); TextureMat[1][1]: drop fragments farther than this;
 // TextureMat[1][3]: over this width inside the outer cut detailed tiles fade into the rough terrain under them: the opaque pass leaves
 // the band out, the fade pass (FADE_PASS) blends it over the rough terrain and blurs its textures more and more towards the edge;
-// TextureMat[3][3]: strength of the haze over the horizon, 0 in skies without the overworld sky disc; TextureMat[3].xyz is then the
+// TextureMat[3][3]: 1 under the overworld sky, 0 in skies without its sky disc; TextureMat[3].xyz is then the
 // color distant terrain fades into, matching that sky instead of the fog color.
 // TextureMat[0][3]: 1 drops the sections vanilla draws itself: TextureMat[1][2] holds them as one bit each, from section TextureMat[0][2]
 // up; TextureMat[0][1] is the camera height, which turns positions back into world heights. A top face right on a section border
 // belongs to the section below it.
 void main() {
+#ifdef WATER_WALL
+    fragColor = vec4(wallColor(relativePosition.y + TextureMat[0][1]), 1.0);
+    return;
+#endif
     // Rough tiles mark the void between floating islands with zero alpha; the island edge lies half way to the void sample.
     if (vertexColor.a < 0.5) {
         DROP;
@@ -252,9 +264,8 @@ void main() {
 #ifndef NO_DISCARD
     // Where vanilla draws, no depth of the rough terrain is kept (see the depth pass), so vanilla is drawn over it wherever it has
     // something, and the rough terrain only fills what vanilla leaves open. Its water stays for that, for the view through vanilla's
-    // water past the last chunk it draws; its ground only along the edge of what vanilla draws, where looking past the edge under
-    // the rough surface would show the sky. Elsewhere its guess of the surface would stand out against the sky between vanilla's
-    // blocks. Where detailed tiles draw, the rough terrain is left out entirely.
+    // water past the last chunk it draws. Its ground there and under the detailed tiles is lowered under their blocks (see the vertex
+    // shader), so it neither stands out between their blocks nor leaves a hole where it is cut out along the edge of what they draw.
     int owner = leftToOthers(relativePosition);
 #ifdef UNDER_DETAIL
     // Only the water within the detailed tiles and vanilla's chunks, drawn under them without depth, see LodRenderer.
@@ -262,9 +273,17 @@ void main() {
         DROP;
     }
 #else
+#ifdef FLOATING
     if (owner == 3 || owner == 1 && wet < 0.5) {
         DROP;
     }
+#else
+    // The ground there lies under their blocks (see the vertex shader). Only where a coast runs through a triangle it may still reach
+    // up to the water and show under their translucent water: those parts are left out.
+    if (owner == 3 && wet >= 0.5 || (owner == 1 || owner == 3) && wet < 0.5 && abs(coastSide) < 0.999) {
+        DROP;
+    }
+#endif
     // The water there is drawn by the pass under the detailed tiles.
     if (wet >= 0.5 && horizontal < TextureMat[2][1]) {
         DROP;
@@ -298,20 +317,11 @@ void main() {
         DROP;
     }
 #endif
-#ifdef UNDER_DETAIL
-    // The water surface once more, opaque in the color of the rough water and without depth, under everything of the detailed tiles:
-    // where they have no ground under their water, it is seen through it instead of the sky. See LodRenderer. Not for pockets of
-    // water under other blocks (marked with 16): they lie between blocks that are drawn, and would show as bright patches.
-    if ((faceCode & 16) != 0) {
-        DROP;
-    }
-    surface = vec4(vertexColor.rgb * spriteAverage() * ROUGH_WATER_SHADE, 1.0);
-#else
     vec4 texel = blockTexture(fade);
     surface = vec4(texel.rgb * vertexColor.rgb, 1.0);
-#endif
-#if defined(WATER_PASS) && !defined(UNDER_DETAIL)
-    surface.a = clamp(texel.a * 0.8, 0.45, 0.7);
+#ifdef WATER_PASS
+    // As opaque as vanilla's water, which takes the alpha of its texture as it is (that of a resource pack too).
+    surface.a = texel.a;
     // Towards the edge of the detailed tiles (TextureMat[2][0]) the water turns into the flat, opaque water of the rough terrain
     // beyond it, so there is no second edge where the seabed suddenly stops showing.
     if (TextureMat[2][0] > 0.0) {
@@ -326,15 +336,19 @@ void main() {
     // deep skirts closing the gaps between tiles, which would fade into the fog towards their bottom.
     float sphericalDistance = fog_spherical_distance(relativePosition);
     float cylindricalDistance = fog_cylindrical_distance(relativePosition);
-    vec4 color = apply_fog(surface, sphericalDistance, cylindricalDistance, FogEnvironmentalStart, FogEnvironmentalEnd, FogRenderDistanceStart, FogRenderDistanceEnd, fogColor);
+    // The LOD terrain's own fog (see LodFog) tells its shape in the end of the clouds, which it has no use for: 1 round, else
+    // cylindrical like vanilla's.
+    float renderDistance = FogCloudsEnd > 0.5 ? sphericalDistance : cylindricalDistance;
+    vec4 color = apply_fog(surface, sphericalDistance, renderDistance, FogEnvironmentalStart, FogEnvironmentalEnd, FogRenderDistanceStart, FogRenderDistanceEnd, fogColor);
 
-    float horizonSine = abs(relativePosition.y) / max(sphericalDistance, 1.0);
-    float bandSine = SKY_DISC_HEIGHT / max(FogSkyEnd, SKY_DISC_HEIGHT);
-    float haze = 1.0 - smoothstep(0.0, bandSine, horizonSine);
-    haze *= smoothstep(1024.0, 8192.0, cylindricalDistance) * TextureMat[3][3];
 #ifdef FADE_PASS
     surface.a = 1.0 - fade;
 #endif
-    fragColor = vec4(mix(color.rgb, FogColor.rgb, haze * FogColor.a), surface.a);
+    vec3 result = color.rgb;
+    if (TextureMat[3][3] > 0.5 && TextureMat[3][0] > 0.0) {
+        float wall = smoothstep(TextureMat[3][0] * WALL_FADE_START, TextureMat[3][0], horizontal);
+        result = mix(result, wallColor(relativePosition.y + TextureMat[0][1]), wall);
+    }
+    fragColor = vec4(result, surface.a);
 }
 #endif

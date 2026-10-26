@@ -38,4 +38,17 @@ abstract class CameraMixin {
             this.depthFar = (float) need;
         }
     }
+
+    /**
+     * Prototype: the far plane at infinity, so LOD terrain millions of blocks away fits the same depth buffer as vanilla's blocks. The
+     * depth is reversed and 32-bit float, so this costs vanilla no precision. The culling frustum keeps vanilla's far plane.
+     */
+    @org.spongepowered.asm.mixin.injection.ModifyArg(
+        method = "update",
+        at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setupPerspective(FFFFF)V"),
+        index = 1
+    )
+    private float farplane$infiniteFarPlane(float zFar) {
+        return com.Evga314.farplanetwocontinuation.client.lod.LodRenderer.mainPassPrototype ? Float.POSITIVE_INFINITY : zFar;
+    }
 }

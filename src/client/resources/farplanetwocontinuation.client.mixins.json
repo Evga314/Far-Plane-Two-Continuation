@@ -3,8 +3,12 @@
   "minVersion": "0.8",
   "package": "com.Evga314.farplanetwocontinuation.mixin.client",
   "compatibilityLevel": "JAVA_25",
+  "mixinextras": {"minVersion": "0.5.0"},
   "client": [
+    "AtmosphericFogEnvironmentMixin",
     "CameraMixin",
+    "EntityRendererMixin",
+    "FogLogMixin",
     "FogRendererMixin",
     "GameRendererMixin",
     "KeyboardHandlerMixin",

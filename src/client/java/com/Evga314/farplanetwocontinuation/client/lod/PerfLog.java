@@ -73,6 +73,10 @@ public final class PerfLog {
     private static int draws;
     /** Triangles drawn this frame, by every pass of the LOD terrain. */
     private static long triangles;
+    /** Passes of the LOD terrain, for the triangles drawn in each. */
+    public static final String[] PASSES = {"rough", "under detail", "detail", "fade", "water", "depth"};
+    private static int pass;
+    private static final long[] passTriangles = new long[PASSES.length];
     private static long trianglesSum;
     private static long uploadNsSum;
     private static long uploadNsMax;
@@ -111,6 +115,10 @@ public final class PerfLog {
     private static final AtomicLong[] meshNs = {new AtomicLong(), new AtomicLong()};
     private static final AtomicLong[] meshes = {new AtomicLong(), new AtomicLong()};
     private static final AtomicLong[] meshNsMax = {new AtomicLong(), new AtomicLong()};
+    private static final AtomicLong changedRefreshes = new AtomicLong();
+    private static final AtomicLong changedRefreshesPutOff = new AtomicLong();
+    private static final AtomicLong changedRefreshesMixed = new AtomicLong();
+    private static final AtomicLong[] meshPausedNs = {new AtomicLong(), new AtomicLong()};
     // CPU time of every thread at the last summary.
     // RU: процессорное время каждого ядра в последней сводке.
     private static final Map<Long, Long> threadCpu = new HashMap<>();
@@ -188,6 +196,12 @@ public final class PerfLog {
     public static void draw(int indices) {
         draws++;
         triangles += indices / 3;
+        passTriangles[pass] += indices / 3;
+    }
+
+    /** The pass of the LOD terrain the next draws belong to, see {@link #PASSES}. */
+    public static void pass(int index) {
+        pass = index;
     }
 
     public static void tickTime(long nanos) {
@@ -234,8 +248,37 @@ public final class PerfLog {
         horizonNsMax = Math.max(horizonNsMax, nanos);
     }
 
-    public static void meshBuilt(boolean detail, long nanos) {
+    /**
+     * A detailed tile with changed blocks under it: asked for again ({@code putOff} false), or put off because all of them lie inside
+     * what vanilla draws. Each tile counts once per kind until its new data arrives.
+     */
+    public static void changedRefresh(boolean putOff) {
+        (putOff ? changedRefreshesPutOff : changedRefreshes).incrementAndGet();
+    }
+
+    private static final java.util.Map<String, Long> FOG_LOGGED = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** The fog at a stage of its setup, at most every few seconds per stage; see FogLogMixin. */
+    public static void fog(String stage, net.minecraft.client.renderer.fog.FogData fog, String fluid) {
+        long now = System.nanoTime();
+        Long last = FOG_LOGGED.get(stage);
+        if (last != null && now - last < SUMMARY_NS) {
+            return;
+        }
+        FOG_LOGGED.put(stage, now);
+        LOGGER.info(String.format(Locale.ROOT,
+            "[FarPlane fog] %s in %s: environmental %.0f..%.0f, render distance %.0f..%.0f, sky %.0f, clouds %.0f",
+            stage, fluid, fog.environmentalStart, fog.environmentalEnd, fog.renderDistanceStart, fog.renderDistanceEnd, fog.skyEnd, fog.cloudEnd));
+    }
+
+    /** A tile asked for again for changed blocks of which some lie inside vanilla's drawing and some outside. */
+    public static void changedRefreshMixed() {
+        changedRefreshesMixed.incrementAndGet();
+    }
+
+    public static void meshBuilt(boolean detail, long nanos, long pausedNanos) {
         int index = detail ? 1 : 0;
+        meshPausedNs[index].addAndGet(pausedNanos);
         meshes[index].incrementAndGet();
         meshNs[index].addAndGet(nanos);
         meshNsMax[index].accumulateAndGet(nanos, Math::max);
@@ -344,6 +387,12 @@ public final class PerfLog {
         int frames = Math.max(1, frameCount);
         line.append(String.format(Locale.ROOT, " | lod pass cpu avg %.2f max %.1f ms, draws avg %d max %d, triangles avg %dk",
             renderNsSum / 1e6 / frames, renderNsMax / 1e6, drawsSum / frames, drawsMax, trianglesSum / frames / 1000));
+        line.append(" (by pass");
+        for (int p = 0; p < PASSES.length; p++) {
+            line.append(' ').append(PASSES[p]).append(' ').append(passTriangles[p] / frames / 1000).append('k');
+            passTriangles[p] = 0L;
+        }
+        line.append(')');
         if (gpuSamples > 0) {
             line.append(String.format(Locale.ROOT, ", gpu avg %.2f max %.1f ms", gpuNsSum / 1e6 / gpuSamples, gpuNsMax / 1e6));
         } else if (!gpuFailed) {
@@ -366,9 +415,12 @@ public final class PerfLog {
             long built = meshes[index].getAndSet(0L);
             long nanos = meshNs[index].getAndSet(0L);
             long max = meshNsMax[index].getAndSet(0L);
-            line.append(String.format(Locale.ROOT, " | %s meshes %d, avg %.1f max %.1f ms",
-                    meshKinds[index], built, built == 0 ? 0.0 : nanos / 1e6 / built, max / 1e6));
+            long paused = meshPausedNs[index].getAndSet(0L);
+            line.append(String.format(Locale.ROOT, " | %s meshes %d, avg %.1f max %.1f ms, paused avg %.1f ms",
+                    meshKinds[index], built, built == 0 ? 0.0 : nanos / 1e6 / built, max / 1e6, built == 0 ? 0.0 : paused / 1e6 / built));
         }
+        line.append(String.format(Locale.ROOT, " | changed blocks: tiles refreshed %d (with changes under vanilla too %d), put off under vanilla %d",
+            changedRefreshes.getAndSet(0L), changedRefreshesMixed.getAndSet(0L), changedRefreshesPutOff.getAndSet(0L)));
         Runtime runtime = Runtime.getRuntime();
         line.append(String.format(Locale.ROOT, " | gc %d (%d ms), heap %d/%d MB",
             lastGcCount - summaryGcCount, lastGcTime - summaryGcTime, (runtime.totalMemory() - runtime.freeMemory()) >> 20, runtime.maxMemory() >> 20));

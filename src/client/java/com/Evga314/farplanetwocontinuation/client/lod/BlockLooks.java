@@ -31,9 +31,12 @@ import net.minecraft.world.level.block.BambooStalkBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.ChorusPlantBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.lighting.LevelLightEngine;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.level.material.Fluids;
 import org.jspecify.annotations.Nullable;
 
@@ -51,14 +54,25 @@ final class BlockLooks {
 
     /**
      * One face of a block: its texture, the average color of the texture and the tint vanilla puts over it. Some faces have a second,
-     * tinted layer over part of them (the grass edge on the side of a grass block), which covers {@code overlayCoverage} of the face.
+     * tinted layer over part of them (the grass edge on the side of a grass block, {@code overlaySprite}), which covers
+     * {@code overlayCoverage} of the face.
      */
     record Face(
         @Nullable TextureAtlasSprite sprite, int average, @Nullable BlockTintSource tint, boolean cutout,
-        int overlayAverage, @Nullable BlockTintSource overlayTint, float overlayCoverage
+        int overlayAverage, @Nullable BlockTintSource overlayTint, float overlayCoverage, @Nullable TextureAtlasSprite overlaySprite
     ) {
         static Face of(@Nullable TextureAtlasSprite sprite, int average, @Nullable BlockTintSource tint, boolean cutout) {
-            return new Face(sprite, average, tint, cutout, 0, null, 0.0F);
+            return new Face(sprite, average, tint, cutout, 0, null, 0.0F, null);
+        }
+
+        /** The tint of the second layer at a place, for textured faces. */
+        int overlayTintColor(BlockState state, @Nullable Holder<Biome> biome, int x, int y, int z) {
+            return this.overlayTint == null ? 0xFFFFFFFF : ARGB.opaque(tintAt(this.overlayTint, state, biome, x, y, z));
+        }
+
+        /** {@link #overlayTintColor} blended between the biomes around, see {@link Blend}. */
+        int overlayTintColorBlended(BlockState state, Blend blend, int y) {
+            return this.overlayTint == null ? 0xFFFFFFFF : ARGB.opaque(tintAtBlended(this.overlayTint, state, blend, y));
         }
 
         /** The average color of the face at a place, with the tint of the biome there. */
@@ -95,11 +109,17 @@ final class BlockLooks {
     /**
      * The faces of a block that detailed tiles draw. {@code plant} is the face of a plant drawn as crossed planes. Thin stalks
      * (bamboo, chorus plants) are drawn as eight-sided columns {@code columnWidth} blocks thick, 0 for every other block; their side
-     * texture is centered on {@code columnU}, the middle of the stalk on the atlas.
+     * texture is centered on {@code columnU}, the middle of the stalk on the atlas. Plants two blocks tall (tall grass, sunflowers)
+     * have their upper half in {@code plantUpper}, null for every other block. {@code groundCover}: a thin layer lying on the ground
+     * without collision (leaf litter, petals, wildflowers), whose texture gaps always show the ground under it. {@code snowySide}: the
+     * side of blocks that look different under snow (grass, podzol, mycelium), as vanilla draws them then; null for the rest.
      */
-    record Look(BlockState state, Face top, Face side, Face plant, boolean fluid, float columnWidth, float columnU) {
+    record Look(
+        BlockState state, Face top, Face side, Face plant, boolean fluid, float columnWidth, float columnU, @Nullable Face plantUpper,
+        boolean groundCover, @Nullable Face snowySide
+    ) {
         Look(BlockState state, Face top, Face side, Face plant, boolean fluid) {
-            this(state, top, side, plant, fluid, 0.0F, 0.0F);
+            this(state, top, side, plant, fluid, 0.0F, 0.0F, null, false, null);
         }
     }
 
@@ -160,6 +180,20 @@ final class BlockLooks {
             Face top = face(parts, state, Direction.UP, mapColor);
             Face side = face(parts, state, Direction.NORTH, mapColor);
             Face plant = face(parts, state, null, mapColor);
+            Face plantUpper = null;
+            if (state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)) {
+                BlockState upper = state.setValue(BlockStateProperties.DOUBLE_BLOCK_HALF, DoubleBlockHalf.UPPER);
+                List<BlockStateModelPart> upperParts = new ArrayList<>();
+                set.get(upper).collectParts(RandomSource.create(42L), upperParts);
+                plantUpper = face(upperParts, upper, null, mapColor);
+            }
+            Face snowySide = null;
+            if (state.hasProperty(BlockStateProperties.SNOWY)) {
+                BlockState snowy = state.setValue(BlockStateProperties.SNOWY, true);
+                List<BlockStateModelPart> snowyParts = new ArrayList<>();
+                set.get(snowy).collectParts(RandomSource.create(42L), snowyParts);
+                snowySide = face(snowyParts, snowy, Direction.NORTH, mapColor);
+            }
             float columnWidth = columnWidth(state);
             BakedQuad stalk = columnWidth > 0.0F ? firstQuad(parts, Direction.NORTH) : null;
             float columnU = 0.0F;
@@ -176,11 +210,21 @@ final class BlockLooks {
             }
             return new Look(
                 state, top != null ? top : particleFace, side != null ? side : particleFace, plant != null ? plant : particleFace, false,
-                stalk != null ? columnWidth : 0.0F, columnU
+                stalk != null ? columnWidth : 0.0F, columnU, plantUpper, groundCover(state), snowySide
             );
         } catch (RuntimeException e) {
             return new Look(state, fallback, fallback, fallback, fluid);
         }
+    }
+
+    /** Thickest a ground cover is, in blocks: the height up to which BlockLook keeps blocks without collision as blocks. */
+    private static final double GROUND_COVER_HEIGHT = 4.0 / 16.0;
+
+    /** Whether a block is a thin layer on the ground without collision, see Look. As thin as BlockLook keeps such blocks as blocks. */
+    private static boolean groundCover(BlockState state) {
+        VoxelShape outline = state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+        return !outline.isEmpty() && outline.max(Direction.Axis.Y) <= GROUND_COVER_HEIGHT
+            && state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty();
     }
 
     /**
@@ -220,7 +264,7 @@ final class BlockLooks {
         if (edge == null) {
             return dirt;
         }
-        return new Face(dirt.sprite(), dirt.average(), null, dirt.cutout(), edge[0], tint, edge[2] / 1000.0F);
+        return new Face(dirt.sprite(), dirt.average(), null, dirt.cutout(), edge[0], tint, edge[2] / 1000.0F, overlay.materialInfo().sprite());
     }
 
     private static @Nullable BakedQuad firstQuad(List<BlockStateModelPart> parts, Direction direction) {

@@ -260,18 +260,4 @@ final class RoughLayer extends LodLayer {
         this.stale.clear();
     }
 
-    /**
-     * Rough tiles reaching into the finished part of the detailed ring drop their fragments there, so the two never overlap. Where
-     * the ring is not finished yet both are drawn, and the depth priority of the renderer lets the detailed blocks win.
-     */
-    void applyDetailCutout(double ringRadius, double fade) {
-        if (this.detailCoverage == null) {
-            return;
-        }
-        for (TileMesh mesh : this.drawList()) {
-            if (mesh.pos.distanceTo(this.view.camX, this.view.camZ) < ringRadius - fade) {
-                mesh.discardRadius = this.detailCoverage.cutoutRadius(mesh.pos);
-            }
-        }
-    }
 }

@@ -92,14 +92,4 @@ final class DetailCoverage {
         return pos.farthestDistanceTo(this.camX, this.camZ) <= this.radius - this.fade && this.missingIn(pos) == 0;
     }
 
-    /**
-     * Radius to cut out of a rough tile reaching into the ring, or 0 while part of the ring under it is still missing. The rough
-     * terrain stays under the fading edge of the ring, where it shows through.
-     */
-    float cutoutRadius(TilePos pos) {
-        if (pos.distanceTo(this.camX, this.camZ) >= this.radius - this.fade) {
-            return 0.0F;
-        }
-        return this.missingIn(pos) == 0 ? (float) (this.radius - this.fade) : 0.0F;
-    }
 }

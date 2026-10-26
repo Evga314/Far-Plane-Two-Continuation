@@ -1,4 +1,4 @@
-SORRY. ALL before this commit (ab06def) is fully vibecoded. I am tired from AI, very tired. And I have not motivation to do this mod more using AI to to ABSOLUTE EVERYTHING. After one small analysis, I understand now, what half of detailed-terrain code and logic is trash.  My java knowledge is very bad now. And I was scared before to do something big and hard just by my hands, so I used AI code agents.  But I am tired becaude AI can not understand us (people), that good for making really good LOD mod for minecraft. My hard solution to continue making this mod, but did not vibecoding (just use AI like a tool, not human replacer) . Yea, it can be slow, hard, but I will do it. You can see full source code at this page (all in that commit at 22 October 2026 and in commits before is fully vibe-coded and some parts of code are really trash, yea). i am open to PR's, issues, your feedback
+
 
 # FarPlaneTwoContinuation
 
@@ -40,7 +40,9 @@ The main page has:
   Fast: always as fast as possible.
 - **Distant Terrain...** and **Detailed Terrain...**: each opens a list of dimensions (Overworld, End), and every dimension has its
   own settings, described below.
-- **Clear LOD Cache of This Dimension...**: same as F3 + O, asks for confirmation first.
+- **Other...**: the New Renderer, settings for getting along with other mods, **Lit Entities High Up** (above 2047 blocks vanilla
+  draws the player, mobs and items black; on by default they get the full light of the sky), and **Clear LOD Cache of This
+  Dimension...** (same as F3 + O, asks for confirmation first).
 
 **Distant Terrain** (per dimension):
 
@@ -55,12 +57,32 @@ The main page has:
   loads much longer.
 - **GPU Memory**: video memory for distant terrain, up to 8 GB. More memory also makes the terrain sharper. Lower it on weak
   devices.
-- **Fog Start**: part of the LOD distance after which terrain fades into fog.
-- **No Fog**: removes all fog (render distance, weather, water, lava). Blindness and darkness still work. Off by default so it does
-  not conflict with other fog mods.
 - **Smoothing** and **Blur** (overworld, each on its own screen): separately for coasts, snow, forest edges, biomes and water of
   different temperatures. Smoothing (1 to 8) rounds the borders off and removes small patches, more for higher values. Blur (none
   to 5) is how wide one color turns into the other at the border, each step twice as wide.
+
+**Fog** (per dimension): the fog goes on over the distant terrain in the same color, and so does the fog of water, lava, weather and
+effects. Fog from blindness and darkness always stays.
+
+- **Fog Above Water**:
+  - **Fog**: whose fog it is.
+    - **Auto**: if another mod has set up the fog (for example Sodium Extra), its fog covers the distant terrain too.
+      Otherwise FarPlaneTwo fog.
+    - **FarPlaneTwo Fog** (default): turns off the fog of other mods and draws its own, the same on vanilla chunks and the distant
+      terrain.
+      In the Overworld the fog takes the color of the sky, as in Smooth Skies, so there is no pale band over the horizon and
+      distant terrain fades smoothly into the sky; the sunset tint stays.
+    - **Other Mod**: the fog stays as vanilla and other mods made it, and goes on over the distant terrain.
+    - **Disable All Fog**: removes all fog above water, rain fog included.
+  - **Fog Radius** (FarPlaneTwo fog): where the fog becomes solid, in blocks from the player (16 000 by default), or at the edge of
+    the distant terrain. Terrain all inside the solid fog is not drawn.
+  - **Fog Start** (FarPlaneTwo fog): where the fog starts, as a percentage of the radius (25% by default), like in Sodium Extra;
+    at 100% the fog still thickens over the last chunk.
+  - **Fog Shape** (FarPlaneTwo fog): cylinder (measured horizontally, like vanilla's fog at the edge of the render distance) or
+    sphere.
+- **Fog Under Water**: vanilla's fog under water (or another mod's). Without it the view under water ends at a wall in the color of
+  the water around the detailed terrain, darker deeper down. The sky and the clouds keep vanilla's fog, so the clouds are not seen
+  through the water surface.
 
 **Detailed Terrain** (per dimension): shows real blocks (trees, buildings) around the normal render distance
 instead of simplified terrain, from chunks that already exist in the world. It also stands in for vanilla chunks that are not
@@ -73,8 +95,16 @@ loaded yet.
   never grows past what the GPU memory setting can hold; beyond that the distant terrain takes over.
 - **Blocks**: how the blocks look. Off: flat colors of the real blocks. Low: blurred textures, thin blocks (snow, carpets, slabs)
   and translucent water like vanilla's. Medium: vanilla textures. High: leaves with gaps, with a closed layer of leaves one block
-  further in, so crowns look full instead of hollow. Ultra: grass and flowers too, up to 64 blocks past vanilla chunks. Every step
-  uses a little more of the video card.
+  further in, so crowns look full instead of hollow. Ultra: grass and flowers too, up to 64 blocks past vanilla chunks, and the light
+  of blocks: torches, lava, glowstone and sea pickles light the terrain around them, and sea pickles glow up to 48 chunks away. In
+  explored chunks this is the world's own light, so it stops at walls and lava closed under the ground does not light the surface;
+  in chunks never visited it is worked out from the blocks that give it. Every
+  step uses a little more of the video card. Thin layers on the ground (leaf litter, petals, wildflowers) show the ground through
+  their gaps from Low up.
+
+The distant and detailed terrain are lit by vanilla's own lightmap, so day and night, night vision, the brightness setting and the
+darkness effect look the same on them as on vanilla's chunks. Under water the light of the sky fades a level per block of water, as in
+vanilla. The grass edge on the sides of grass blocks takes the color of the biome; under snow their sides are snowy, as in vanilla.
 - **GPU Memory**: video memory for detailed terrain, up to 8 GB. More memory makes the area larger.
 
 How fine the detailed terrain is gets chosen by itself from the screen resolution and FOV: finer cells than that would not be seen.
@@ -121,7 +151,7 @@ are generated for it, the number of generator threads, the request queue per pla
    smoothed along a smooth line, with steps straightened and corners rounded off (high shores are cut back a little, sloping gently down to the water; narrow islands, peninsulas and rivers stay; far away, along a grid three times finer than the samples): the ground
    next to the coast is moved a little so that it still reaches the water exactly along the smoothed line. The snow line and the edges of
    forests are drawn the same way, sharp: snow at the height where it starts in the biome, forests where their tree tops end (a little soft; sparse trees of savannas and swamps stay blended), and borders between biomes of clearly different colors, and between waters of different temperatures are drawn as a soft line; borders on land and borders between waters each have a color of their own on the samples, so both run on across coasts, instead of blending land into water over a whole cell. In wooded biomes (forests, taiga, jungle, mangrove swamps, cherry groves, savannas and others) the surface is raised to
-   where the tree tops would be, in patches as dense as the trees of the biome and thinning out on steep slopes, and painted in the color of their leaves. Ice spikes biomes get their spikes the same way, pointed and in the color of packed ice.
+   where the tree tops would be, in patches as dense as the trees of the biome and thinning out on steep slopes, and painted in the color of their leaves. Where vanilla mixes kinds of trees (oaks with birches, the red, orange and yellow poplars of dappled forests, acacias with oaks), each patch has the leaves of one kind, in the shares vanilla plants them. Ice spikes biomes get their spikes the same way, pointed and in the color of packed ice.
    Every tile shapes its borders together with a margin of its neighbours' samples, so two tiles always agree on their shared edge
    instead of showing a line there; a tile whose neighbour arrives later is built again once.
 4. Near tiles find the surface exactly by sampling the noise density. Far tiles (32+ blocks between samples) use the generator's 2D
@@ -133,7 +163,7 @@ are generated for it, the number of generator threads, the request queue per pla
 5. Detailed tiles are built from real blocks: chunks loaded on the server are read directly and chunks saved on disk are read from
    the region files without loading them into the world; only the sections near the surface are decoded. For every column up to
    three runs of blocks are kept: water, leaves and other blocks that can be seen through are runs of their own, so the ground under
-   them is drawn too, and so is what lies on water (ice, lily pads), which floats instead of reaching down to the bottom. They are drawn as boxes with the block textures (or their colors), with grass, leaves and water tinted by the
+   them is drawn too, and so is what lies on water (ice, lily pads), which floats instead of reaching down to the bottom. Whether a block stands in water is taken from the real block: kelp, seagrass, corals and sea pickles in the sea are drawn as plants standing in the water, a coral on dry land stays dry, and a waterlogged slab or other thin block has water over it up to the surface. Where a cave goes on past the part the server follows, the ground it is cut off with is drawn dim, as the inside of a cave with little light. They are drawn as boxes with the block textures (or their colors), with grass, leaves and water tinted by the
    biome. Next to the player every cell is one block; cells get coarser with distance, up to one cell per 4 blocks. Region files are read a few chunks at a time, so the
    server's own chunk loading never waits on LOD work.
    When blocks change, the server notes the chunk (a few bytes, nothing extra is saved) and the detailed tiles over it are loaded
@@ -156,14 +186,17 @@ are generated for it, the number of generator threads, the request queue per pla
    goes past the far plane of the vanilla renderer, the ground below the player is drawn by LOD as well.
 8. Finished tiles are cached in the world folder (`<world>/farplanetwocontinuation/`) and are never generated twice. When a new
    version of the mod stores them differently, the outdated cache is cleared on the first start and made again.
-9. The client builds meshes on a background thread and draws them through Minecraft's own rendering API (renderpearl): a separate
-   pass before vanilla terrain, with its own projection fitted to the visible tiles. Where two layers cover the same place, the
+9. The client builds meshes on a background thread and draws them through Minecraft's own rendering API (renderpearl). By default
+   (New Renderer, in Other settings) LOD terrain is drawn inside vanilla's own pass, sharing its depth buffer: nothing is drawn
+   under vanilla blocks, clouds and mobs hide behind LOD mountains, and under water the view can end at a wall. With Iris shaders
+   it switches by itself to the old way, and back when they are turned off: a separate pass before vanilla terrain, with its own
+   projection fitted to the visible tiles. Where two layers cover the same place, the
    more detailed one wins: vanilla over detailed tiles, detailed tiles over rough ones. This costs nothing on the CPU: less
    detailed layers are only moved a little away from the camera for the depth test. Detailed tiles are left out wherever vanilla
    (or Sodium) already draws a chunk. All LOD terrain is drawn from the front only: the distant surface faces up and the skirts that
    close the gaps between tiles of different detail face out of their tile and reach only as deep as needed, so from under the
-   ground hardly anything of it shows, and walls of neighbouring tiles never flicker. Afterwards the depth is written again in
-   vanilla's own depth range beyond vanilla's render distance, so clouds behind LOD mountains are hidden.
+   ground hardly anything of it shows, and walls of neighbouring tiles never flicker. In the old way the depth is written again
+   afterwards in vanilla's own depth range beyond vanilla's render distance, so clouds behind LOD mountains are hidden.
 10. Finished meshes are uploaded to the GPU for a few milliseconds per frame at most; big ones are written in parts over several
     frames, so loading never stalls a frame. When frames run late, the background work of the mod pauses for a moment and leaves
     the CPU to the game. How much it holds back follows the player's speed (see Loading While Moving): walking, frames come first;
@@ -221,6 +254,10 @@ The jar ends up in `build/libs/FarPlaneTwoContinuation-x.x.x.jar`.
 CPU frequencies, temperatures, the parts of the client tick and of tile generation) and every settings change to `latest.log`, for
 finding the cause of stutters on a device. In it, parts of the distant terrain can be turned off or marked in color by creating
 files named `farplane-debug-...` in `config/` while the game runs.
+
+## AI using
+
+I made this mod, using AI like a tool, and controlling it how it was possible for me
 
 ## Credits
 

@@ -2,6 +2,7 @@ package com.Evga314.farplanetwocontinuation.server;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain;
+import com.Evga314.farplanetwocontinuation.tile.BlockLook;
 import com.Evga314.farplanetwocontinuation.tile.Zip;
 import com.mojang.logging.LogUtils;
 import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
@@ -49,7 +50,7 @@ import org.slf4j.Logger;
 final class VirtualChunkStore {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int MAGIC = 0x46505643;
-    static final int FORMAT = 23;
+    static final int FORMAT = 28;
     private static final int REGION = VirtualTerrain.REGION;
     /**
      * About 2 MB per region in memory, one region per 256 MB of heap (16 with 4 GB): enough for the regions around a player with a
@@ -115,7 +116,7 @@ final class VirtualChunkStore {
      * Summaries of chunks nobody has generated yet. A few chunks at the edge of explored land are made on their own; where more are
      * missing, the whole region is made at once, see {@link #WHOLE_REGION}.
      */
-    Long2ObjectMap<ChunkSummary> chunks(ServerLevel level, LongCollection wanted) {
+    Long2ObjectMap<ChunkSummary> chunks(ServerLevel level, LongCollection wanted, ChunkSummary.Scan scan) {
         Long2ObjectOpenHashMap<ChunkSummary> result = new Long2ObjectOpenHashMap<>();
         VirtualTerrain terrain = this.terrain(level);
         if (terrain == null || wanted.isEmpty()) {
@@ -127,7 +128,7 @@ final class VirtualChunkStore {
             byRegion.computeIfAbsent(key, k -> new LongArrayList()).add(chunk);
         }
         for (Map.Entry<Key, LongArrayList> entry : byRegion.entrySet()) {
-            ChunkSummary[] region = this.region(level, terrain, entry.getKey(), entry.getValue());
+            ChunkSummary[] region = this.region(level, terrain, entry.getKey(), entry.getValue(), scan);
             for (long chunk : entry.getValue()) {
                 ChunkSummary summary = region[index(chunk)];
                 if (summary != null) {
@@ -138,19 +139,79 @@ final class VirtualChunkStore {
         return result;
     }
 
+    /**
+     * Summaries of chunks made before, kept in memory or on disk; nothing is generated. For the ring around a detailed tile, which only
+     * uses what is there already. Regions being made right now are skipped: they are written again in a moment.
+     */
+    Long2ObjectMap<ChunkSummary> stored(ServerLevel level, LongCollection wanted, ChunkSummary.Scan scan) {
+        Long2ObjectOpenHashMap<ChunkSummary> result = new Long2ObjectOpenHashMap<>();
+        if (wanted.isEmpty() || this.terrain(level) == null) {
+            return result;
+        }
+        Map<Key, LongArrayList> byRegion = new HashMap<>();
+        for (long chunk : wanted) {
+            Key key = new Key(level.dimension().identifier(), Math.floorDiv(ChunkPos.getX(chunk), REGION), Math.floorDiv(ChunkPos.getZ(chunk), REGION));
+            byRegion.computeIfAbsent(key, k -> new LongArrayList()).add(chunk);
+        }
+        for (Map.Entry<Key, LongArrayList> entry : byRegion.entrySet()) {
+            Key key = entry.getKey();
+            if (this.generating.contains(key)) {
+                continue;
+            }
+            ChunkSummary[] region;
+            synchronized (this) {
+                region = this.memory.get(key);
+            }
+            if (region == null || !scannedWith(region, scan)) {
+                region = this.read(level, key, scan);
+                if (region == null) {
+                    continue;
+                }
+                ChunkSummary[] read = region;
+                synchronized (this) {
+                    // A region made meanwhile holds more chunks than the file read before; it stays.
+                    this.memory.compute(key, (k, old) -> old != null && scannedWith(old, scan) ? old : read);
+                }
+            }
+            for (long chunk : entry.getValue()) {
+                ChunkSummary summary = region[index(chunk)];
+                if (summary != null) {
+                    result.put(chunk, summary);
+                }
+            }
+        }
+        return result;
+    }
+
+    /** Whether a virtual chunk was made for a place, as far as memory knows; for the performance log only. */
+    boolean madeInMemory(Identifier dimension, long chunk, ChunkSummary.Scan scan) {
+        Key key = new Key(dimension, Math.floorDiv(ChunkPos.getX(chunk), REGION), Math.floorDiv(ChunkPos.getZ(chunk), REGION));
+        ChunkSummary[] region;
+        synchronized (this) {
+            region = this.memory.get(key);
+        }
+        return region != null && scannedWith(region, scan) && region[index(chunk)] != null;
+    }
+
     private static int index(long chunk) {
         return Math.floorMod(ChunkPos.getX(chunk), REGION) + Math.floorMod(ChunkPos.getZ(chunk), REGION) * REGION;
     }
 
-    /** One region with at least the wanted chunks made. Threads asking for the same region take turns, so nothing is made twice. */
-    private ChunkSummary[] region(ServerLevel level, VirtualTerrain terrain, Key key, LongArrayList wanted) {
+    /**
+     * One region with at least the wanted chunks made. Threads asking for the same region take turns, so nothing is made twice. A
+     * region scanned to another depth is made again.
+     */
+    private ChunkSummary[] region(ServerLevel level, VirtualTerrain terrain, Key key, LongArrayList wanted, ChunkSummary.Scan scan) {
         synchronized (this.locks[(key.hashCode() & Integer.MAX_VALUE) % this.locks.length]) {
             ChunkSummary[] region;
             synchronized (this) {
                 region = this.memory.get(key);
             }
+            if (region != null && !scannedWith(region, scan)) {
+                region = null;
+            }
             if (region == null) {
-                region = this.read(level, key);
+                region = this.read(level, key, scan);
                 if (region == null) {
                     region = new ChunkSummary[REGION * REGION];
                 }
@@ -188,21 +249,32 @@ final class VirtualChunkStore {
                 if (ServerPerf.ON) {
                     ServerPerf.VIRTUAL_REGIONS.add(System.nanoTime() - start);
                     ServerPerf.VIRTUAL_CHUNKS.addAndGet(made.length);
+                    ServerPerf.VIRTUAL_CHUNKS_TOTAL.addAndGet(made.length);
                 }
                 region = region.clone();
                 int width = maxX - minX + 1;
                 for (int i = 0; i < made.length; i++) {
                     ProtoChunk chunk = made[i];
                     region[index(ChunkPos.pack(minX + i % width, minZ + i / width))] =
-                        ChunkSummary.saved(chunk.getSections(), chunk.getMinSectionY(), null, level.getMinY(), level.getMaxY());
+                        ChunkSummary.saved(chunk.getSections(), chunk.getMinSectionY(), null, null, scan, level.getMinY(), level.getMaxY());
                 }
-                this.write(level, key, region);
+                this.write(level, key, region, scan);
             }
             synchronized (this) {
                 this.memory.put(key, region);
             }
             return region;
         }
+    }
+
+    /** Whether the summaries of a region were made with a scan; all of them always are made with the same one. */
+    private static boolean scannedWith(ChunkSummary[] region, ChunkSummary.Scan scan) {
+        for (ChunkSummary summary : region) {
+            if (summary != null) {
+                return summary.scan().equals(scan);
+            }
+        }
+        return true;
     }
 
     /**
@@ -257,7 +329,8 @@ final class VirtualChunkStore {
         return result.toString();
     }
 
-    private ChunkSummary @Nullable [] read(ServerLevel level, Key key) {
+    /** A region kept on disk; {@code null} when there is none, it is broken, or it was scanned to another depth. */
+    private ChunkSummary @Nullable [] read(ServerLevel level, Key key, ChunkSummary.Scan scan) {
         Path file = this.file(key);
         if (file == null || !Files.isRegularFile(file)) {
             return null;
@@ -267,7 +340,7 @@ final class VirtualChunkStore {
                 return null;
             }
             DataInputStream header = new DataInputStream(new ByteArrayInputStream(Files.readAllBytes(file)));
-            if (header.readInt() != MAGIC || header.readInt() != FORMAT || header.readLong() != this.seed) {
+            if (header.readInt() != MAGIC || header.readInt() != FORMAT || header.readLong() != this.seed || header.readShort() != scan.depth()) {
                 return null;
             }
             try (InputStream body = Zip.decompress(header)) {
@@ -296,7 +369,9 @@ final class VirtualChunkStore {
                     if (id == null || !BuiltInRegistries.BLOCK.containsKey(id)) {
                         return null;
                     }
-                    blocks[i] = BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.getValue(id));
+                    int raw = BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.getValue(id));
+                    // Whether it stands in water, see BlockLook#segment.
+                    blocks[i] = in.readBoolean() && raw < BlockLook.WET ? raw | BlockLook.WET : raw;
                 }
                 long[] present = new long[REGION * REGION / 64];
                 for (int i = 0; i < present.length; i++) {
@@ -305,7 +380,7 @@ final class VirtualChunkStore {
                 ChunkSummary[] summaries = new ChunkSummary[REGION * REGION];
                 for (int i = 0; i < summaries.length; i++) {
                     if ((present[i >> 6] & 1L << (i & 63)) != 0) {
-                        summaries[i] = ChunkSummary.read(in, palette, blocks, level.getMinY(), level.getMaxY());
+                        summaries[i] = ChunkSummary.read(in, palette, blocks, scan, level.getMinY(), level.getMaxY());
                     }
                 }
                 return summaries;
@@ -316,7 +391,7 @@ final class VirtualChunkStore {
         }
     }
 
-    private void write(ServerLevel level, Key key, ChunkSummary[] summaries) {
+    private void write(ServerLevel level, Key key, ChunkSummary[] summaries, ChunkSummary.Scan scan) {
         Path file = this.file(key);
         if (file == null) {
             return;
@@ -352,6 +427,7 @@ final class VirtualChunkStore {
             header.writeInt(MAGIC);
             header.writeInt(FORMAT);
             header.writeLong(this.seed);
+            header.writeShort(scan.depth());
             header.flush();
             try (DataOutputStream out = new DataOutputStream(Zip.compress(bytes))) {
                 out.writeShort(ordered.size());
@@ -362,9 +438,11 @@ final class VirtualChunkStore {
                 }
                 out.writeShort(blocks.size());
                 for (int block : blocks) {
-                    byte[] text = BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(block)).toString().getBytes(StandardCharsets.UTF_8);
+                    byte[] text = BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(BlockLook.segmentBlock(block))).toString()
+                        .getBytes(StandardCharsets.UTF_8);
                     out.writeShort(text.length);
                     out.write(text);
+                    out.writeBoolean(BlockLook.segmentWet(block));
                 }
                 long[] present = new long[REGION * REGION / 64];
                 for (int i = 0; i < summaries.length; i++) {

@@ -3,6 +3,7 @@ package com.Evga314.farplanetwocontinuation.client;
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.client.lod.GeneralMeshFactory;
 import com.Evga314.farplanetwocontinuation.config.ConfigFiles;
+import com.Evga314.farplanetwocontinuation.config.ServerConfig;
 import com.Evga314.farplanetwocontinuation.dimension.DimensionKind;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -28,6 +29,13 @@ public class ClientConfig {
      * off; this extends the far plane to the slant distance to that edge. Off by default.
      */
     public boolean extendCloudFarPlane = false;
+    /**
+     * LOD terrain drawn inside vanilla's main pass, see LodRenderer.mainPassPrototype. On by default; with Iris shaders the LOD pass of
+     * its own is used instead. Named apart from the experimental setting before it, which was off by default.
+     */
+    public boolean newRenderer = true;
+    /** Entities above the top of the world get the full light of the sky, instead of vanilla's black past 2047. See EntityRendererMixin. */
+    public boolean fixHighEntityLight = true;
     public int maxUploadsPerFrame = 12;
     /** Mesh builder threads: 0 lets the mod choose by core count, see {@link #resolvedMeshThreads()}. */
     public int meshThreads;
@@ -70,10 +78,16 @@ public class ClientConfig {
         public int sharpness = 1;
         /** Upper bound for tiles kept on the GPU. Each one takes about 34 KB of video memory. */
         public int maxGpuTiles = 2048;
-        /** Fraction of the LOD distance after which terrain fades into fog. */
-        public float fogStart = 0.75F;
-        /** Removes all fog except blindness and darkness. Off by default so it does not fight with dedicated no-fog mods. */
-        public boolean disableFog = false;
+        /** Where this mod's fog starts, as a fraction of {@link #fogEnd}; see {@link #fogStart(float)}. */
+        public float fogStart = 0.25F;
+        /** The radius of this mod's fog, where it becomes solid, in blocks from the player; 0 for the LOD distance. */
+        public int fogEnd = 16000;
+        /** How the distance of the fog of the LOD terrain is measured: 0 cylindrical, like vanilla's fog at its render distance; 1 round. */
+        public int fogShape = 0;
+        /** Whose fog is out of water, one of the FOG_ constants; see FogRendererMixin. */
+        public int fogMode = FOG_OWN;
+        /** Vanilla's fog under water. Without it the view under water ends at a wall around the detailed terrain, see LodRenderer.WALL_PIPELINE. */
+        public boolean waterFog = true;
         /** How much the borders of the distant terrain are smoothed, see {@link Smoothing}. */
         public Smoothing smoothing = new Smoothing();
 
@@ -82,11 +96,22 @@ public class ClientConfig {
             this.startLevel = Mth.clamp(this.startLevel, 0, MAX_START_LEVEL);
             this.sharpness = Mth.clamp(this.sharpness, 0, SHARPNESS.length - 1);
             this.maxGpuTiles = Mth.clamp(this.maxGpuTiles, 256, 1 << 19);
-            this.fogStart = Float.isFinite(this.fogStart) ? Mth.clamp(this.fogStart, 0.1F, 0.98F) : 0.75F;
+            this.fogStart = Float.isFinite(this.fogStart) ? Mth.clamp(this.fogStart, 0.0F, 1.0F) : 0.25F;
+            this.fogEnd = Mth.clamp(this.fogEnd, 0, FarPlaneConstants.MAX_LOD_DISTANCE);
+            this.fogShape = Mth.clamp(this.fogShape, 0, 1);
+            this.fogMode = Mth.clamp(this.fogMode, FOG_AUTO, FOG_OFF);
             if (this.smoothing == null) {
                 this.smoothing = new Smoothing();
             }
             this.smoothing.sanitize();
+        }
+
+        /**
+         * Where this mod's fog starts for a radius of {@code end}: like Sodium Extra's fog start, even at 100% the fog still thickens over
+         * the last chunk.
+         */
+        public float fogStart(float end) {
+            return Math.max(end - FOG_MIN_WIDTH, 0.0F) * this.fogStart;
         }
 
         /** Fog settings are left out, they apply right away. */
@@ -164,6 +189,16 @@ public class ClientConfig {
     public static final double[] SHARPNESS = {1.0, 1.5, 2.25, 8.0};
     /** Coarsest cells allowed at the start of the distant terrain: 16 blocks. */
     public static final int MAX_START_LEVEL = 4;
+    /** Width of this mod's fog at a start of 100%, in blocks. */
+    public static final float FOG_MIN_WIDTH = 16.0F;
+    /** The fog out of water: another mod's when one has set it, otherwise this mod's. */
+    public static final int FOG_AUTO = 0;
+    /** The fog out of water: this mod's, over whatever other mods have set. */
+    public static final int FOG_OWN = 1;
+    /** The fog out of water: vanilla's as other mods leave it, going on over the LOD terrain. */
+    public static final int FOG_OTHER = 2;
+    /** No fog out of water. */
+    public static final int FOG_OFF = 3;
 
     /** Detailed terrain from real chunks in a ring around the player. */
     public static class DetailSettings {
@@ -176,6 +211,11 @@ public class ClientConfig {
         public boolean generate = true;
         /** How detailed the blocks look, see {@link BlockDetail}. */
         public int blockDetail = BlockDetail.MEDIUM.ordinal();
+        /**
+         * How many blocks down from the top of a column the server looks; 0 until set, then the default of the dimension. Only the
+         * owner of a singleplayer world decides it, on a server its config file does.
+         */
+        public int scanDepth = 0;
 
         public BlockDetail blocks() {
             return BlockDetail.of(this.blockDetail);
@@ -189,7 +229,7 @@ public class ClientConfig {
 
         String signature() {
             return this.enabled + "|" + this.radiusChunks + "|" + this.gpuMegabytes + "|" + this.generate
-                + "|" + this.blockDetail;
+                + "|" + this.blockDetail + "|" + this.scanDepth;
         }
     }
 
@@ -240,6 +280,14 @@ public class ClientConfig {
         this.loadSpeed = LoadSpeed.of(this.loadSpeed).ordinal();
         this.distant.values().forEach(DistantSettings::sanitize);
         this.detailed.values().forEach(DetailSettings::sanitize);
+        for (DimensionKind kind : DimensionKind.values()) {
+            if (kind.hasLod()) {
+                DetailSettings detail = this.detail(kind);
+                detail.scanDepth = detail.scanDepth <= 0
+                    ? kind == DimensionKind.END ? FarPlaneConstants.DEFAULT_END_SCAN_DEPTH : FarPlaneConstants.DEFAULT_SCAN_DEPTH
+                    : ServerConfig.scanDepth(detail.scanDepth);
+            }
+        }
     }
 
     private void migrate() {
@@ -254,7 +302,7 @@ public class ClientConfig {
             distant.fogStart = this.fogStart;
         }
         if (this.disableFog != null) {
-            distant.disableFog = this.disableFog;
+            distant.fogMode = this.disableFog ? FOG_OFF : FOG_OWN;
         }
         if (this.overworldDetail != null) {
             this.detailed.put(DimensionKind.OVERWORLD.id(), this.overworldDetail);

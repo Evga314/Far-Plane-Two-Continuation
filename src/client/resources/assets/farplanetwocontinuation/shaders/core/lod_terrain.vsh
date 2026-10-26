@@ -4,6 +4,13 @@
 #include <minecraft:dynamictransforms.glsl>
 #include <minecraft:projection.glsl>
 #include <minecraft:fog.glsl>
+#ifdef LIGHTMAP
+#include <minecraft:sample_lightmap.glsl>
+
+// Vanilla's lightmap: the color of every pair of sky and block light, with the time of day, night vision, the brightness setting and
+// the darkness effect in it, the same the vanilla terrain is lit with.
+uniform sampler2D Sampler2;
+#endif
 
 const float ROUGH_UNDER_DETAIL = 1.25;
 // Beyond the ring the push fades out over this part of its radius. A step would break triangles crossing the ring edge into stripes;
@@ -15,7 +22,8 @@ const float WATER_PRIORITY = 0.998;
 #endif
 
 #ifdef TEXTURED
-// Fixed point: x and z in 64ths of a block, y in 16ths; w is the sprite size in texels. UV0 is the sprite corner in half texels.
+// Fixed point: x and z in 64ths of a block, y in 18ths; w is the sprite size in texels, with the block light over it from bit 12.
+// UV0 is the sprite corner in half texels.
 layout(location = 0) in ivec4 Position;
 layout(location = 1) in vec4 Color;
 layout(location = 2) in uvec2 UV0;
@@ -41,6 +49,30 @@ layout(location = 8) out vec4 waterThird;
 layout(location = 9) out float coastSide;
 #endif
 
+#if defined(ROUGH) && !defined(NO_DISCARD) && !defined(FLOATING)
+// The chunks vanilla and the detailed tiles draw, see the fragment shader and LodManager.ChunkMask.
+uniform isamplerBuffer ChunkMask;
+
+// A height around the camera under every block vanilla or the detailed tiles draw in the chunk of a point, or none (a very large
+// value). Vanilla's chunks count only as far above and below the camera as it draws sections, as in the fragment shader.
+float floorUnder(vec3 position) {
+    int chunks = texelFetch(ChunkMask, 2).r;
+    if (chunks < 0) {
+        return 1.0e9;
+    }
+    vec2 camera = vec2(intBitsToFloat(texelFetch(ChunkMask, 0).r), intBitsToFloat(texelFetch(ChunkMask, 1).r));
+    ivec2 chunk = ivec2(floor((position.xz + camera) / 16.0)) + chunks;
+    int side = 2 * chunks + 1;
+    if (chunk.x < 0 || chunk.y < 0 || chunk.x >= side || chunk.y >= side) {
+        return 1.0e9;
+    }
+    int value = texelFetch(ChunkMask, 5 + chunk.x + chunk.y * side).r;
+    int floorCode = (value >> 16) & 0xFFFF;
+    bool drawn = (value & 256) != 0 || (value & 3) != 0 && abs(position.y) < intBitsToFloat(texelFetch(ChunkMask, 3).r);
+    return floorCode == 0 || !drawn ? 1.0e9 : float(floorCode) - intBitsToFloat(texelFetch(ChunkMask, 4).r);
+}
+#endif
+
 layout(location = 0) out float sphericalVertexDistance;
 layout(location = 1) out float cylindricalVertexDistance;
 layout(location = 2) out vec4 vertexColor;
@@ -48,7 +80,8 @@ layout(location = 3) out vec3 relativePosition;
 layout(location = 4) out vec4 viewPosition;
 #ifdef TEXTURED
 // Detailed tiles with block textures: the position inside the tile (its corner lies on the block grid), the sprite corner in the atlas
-// and its size in texels, and how the face maps to the texture, kept in the alpha of the color: 255 minus the kind, minus 4 with gaps.
+// and its size in texels, and how the face maps to the texture, kept in the alpha of the color: 255 minus the kind, minus 4 with gaps,
+// minus 8 for translucent water; the high four bits of what is taken away are how much the sky light is under 15.
 layout(location = 5) out vec3 tilePosition;
 layout(location = 6) flat out vec4 sprite;
 layout(location = 7) flat out int faceCode;
@@ -56,7 +89,7 @@ layout(location = 7) flat out int faceCode;
 
 void main() {
 #ifdef TEXTURED
-    vec3 localPosition = vec3(Position.xyz) * vec3(1.0 / 64.0, 1.0 / 16.0, 1.0 / 64.0);
+    vec3 localPosition = vec3(Position.xyz) * vec3(1.0 / 64.0, 1.0 / 18.0, 1.0 / 64.0);
 #else
     vec3 localPosition = Position;
 #endif
@@ -88,6 +121,14 @@ void main() {
         pos.y -= canopy * (1.0 - rise);
     }
 #endif
+#if defined(ROUGH) && !defined(NO_DISCARD) && !defined(FLOATING)
+    // Where vanilla or the detailed tiles draw, the ground of the rough terrain goes down under their blocks instead of being cut out:
+    // through any gap along the edge of what they draw, its slope down under them is seen, never a hole down to the bottom of the
+    // world. Its water stays where it is, to be seen through theirs.
+    if (land && WaterColor.a * 16.0 - 15.0 <= 0.0) {
+        pos.y = min(pos.y, floorUnder(pos));
+    }
+#endif
     viewPosition = ModelViewMat * vec4(pos, 1.0);
 #ifdef DEPTH_ONLY
     gl_Position = ProjMat * viewPosition;
@@ -116,6 +157,18 @@ void main() {
 #else
     vertexColor = Color * ColorModulator;
 #endif
+    vec4 lightColor = vec4(1.0);
+#ifdef LIGHTMAP
+#ifdef TEXTURED
+    int code = 255 - int(Color.a * 255.0 + 0.5);
+    ivec2 light = ivec2(((Position.w >> 12) & 15) * 16, (15 - (code >> 4)) * 16);
+#else
+    // Rough tiles and flat detailed ones lie in the open: the full light of the sky, no block light.
+    ivec2 light = ivec2(0, 240);
+#endif
+    lightColor = sample_lightmap(Sampler2, light);
+    vertexColor.rgb *= lightColor.rgb;
+#endif
 #ifdef ROUGH
     // The fragment shader only needs to know land from the void.
     vertexColor.a = land ? 1.0 : 0.0;
@@ -127,14 +180,16 @@ void main() {
     landThird = LandThird;
     waterThird = WaterThird;
 #else
-    waterColor = vec4(WaterColor.rgb * ColorModulator.rgb, WaterColor.a);
-    landThird = vec4(LandThird.rgb * ColorModulator.rgb, LandThird.a);
-    waterThird = vec4(WaterThird.rgb * ColorModulator.rgb, WaterThird.a);
+    waterColor = vec4(WaterColor.rgb * ColorModulator.rgb * lightColor.rgb, WaterColor.a);
+    landThird = vec4(LandThird.rgb * ColorModulator.rgb * lightColor.rgb, LandThird.a);
+    waterThird = vec4(WaterThird.rgb * ColorModulator.rgb * lightColor.rgb, WaterThird.a);
 #endif
 #endif
 #ifdef TEXTURED
     tilePosition = localPosition;
-    sprite = vec4(vec2(UV0) * 0.5, float(Position.w), float(Position.w));
-    faceCode = 255 - int(Color.a * 255.0 + 0.5);
+    sprite = vec4(vec2(UV0) * 0.5, float(Position.w & 4095), float(Position.w & 4095));
+    faceCode = (255 - int(Color.a * 255.0 + 0.5)) & 15;
+    // The alpha holds the face code and the sky light, not a cut: detailed tiles are never void.
+    vertexColor.a = 1.0;
 #endif
 }

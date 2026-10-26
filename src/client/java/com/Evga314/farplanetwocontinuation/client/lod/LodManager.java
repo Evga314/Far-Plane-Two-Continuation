@@ -99,7 +99,7 @@ public final class LodManager {
     private int drawnX;
     private int drawnZ;
     /** What the rough terrain leaves to vanilla and the detailed tiles this tick, read by the renderer, see {@link #updateChunkMask}. */
-    private volatile ChunkMask chunkMask = new ChunkMask(new int[0], -1, 0, 0, 0.0F, 0);
+    private volatile ChunkMask chunkMask = new ChunkMask(new int[0], -1, 0, 0, 0.0F, 0, 0);
     /** The values of the mask being made, swapped with those of {@link #chunkMask} only when they differ. */
     private int[] nextMaskValues = new int[0];
     private int maskVersion;
@@ -110,7 +110,8 @@ public final class LodManager {
         int threads = config.resolvedMeshThreads();
         AtomicInteger counter = new AtomicInteger();
         this.meshExecutor = new ThreadPoolExecutor(threads, threads, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), runnable -> {
-            Thread thread = new Thread(runnable, "FarPlane mesh builder #" + counter.incrementAndGet());
+            // A worker, so its pauses for late frames go by the time it worked, see WorkThrottle.
+            Thread thread = new WorkThrottle.Worker(runnable, "FarPlane mesh builder #" + counter.incrementAndGet());
             thread.setDaemon(true);
             thread.setPriority(Thread.MIN_PRIORITY);
             thread.setUncaughtExceptionHandler((t, e) -> LOGGER.error("Uncaught error in {}", t.getName(), e));
@@ -162,15 +163,22 @@ public final class LodManager {
      * under vanilla's, {@link #VANILLA_EDGE} those next to chunks vanilla does not draw, where all of it is, to fill the view past the
      * edge under its surface. {@link #DETAILED} marks chunks the detailed tiles draw, where it is left out entirely, but for its water
      * in those along their edge ({@link #DETAILED_EDGE}): it fills the view under the edge of their water, which lies a little higher.
+     * From bit {@link #FLOOR_SHIFT} on: a height under every block vanilla or the detailed tiles draw in the chunk, counted from
+     * {@code minY} up from 1, 0 for none. The ground of the rough terrain is lowered under it there instead of cut out, so through a gap
+     * at the edge of what they draw its slope down under them is seen, never a hole down to the bottom of the world.
      */
-    record ChunkMask(int[] values, int half, int originX, int originZ, float reach, int version) {
+    record ChunkMask(int[] values, int half, int originX, int originZ, float reach, int minY, int version) {
         static final int VANILLA = 1;
         static final int VANILLA_EDGE = 2;
         static final int DETAILED = 256;
         static final int DETAILED_EDGE = 512;
+        static final int FLOOR_SHIFT = 16;
+        static final int MAX_FLOOR = 0xFFFF;
     }
 
     private int seenDetailVersion = -1;
+    /** The floors of the chunks of the mask being made, see ChunkMask; kept from tick to tick. */
+    private int[] maskFloors = new int[0];
 
     /**
      * Puts the chunks vanilla draws and those the detailed tiles draw together, see {@link ChunkMask}. A chunk is marked detailed while
@@ -192,11 +200,17 @@ public final class LodManager {
             Arrays.fill(this.nextMaskValues, 0);
         }
         int[] values = this.nextMaskValues;
+        if (this.maskFloors.length != side * side) {
+            this.maskFloors = new int[side * side];
+        }
+        int[] floors = this.maskFloors;
+        Arrays.fill(floors, LodView.NO_FLOOR);
         for (int z = 0; z < side; z++) {
             for (int x = 0; x < side; x++) {
                 if (drawn[x + z * side] == 0) {
                     continue;
                 }
+                floors[x + z * side] = this.view.chunkFloor(this.drawnX + x - half, this.drawnZ + z - half);
                 boolean edge = false;
                 for (int nz = z - 1; nz <= z + 1 && !edge; nz++) {
                     for (int nx = x - 1; nx <= x + 1; nx++) {
@@ -238,6 +252,18 @@ public final class LodManager {
                         }
                     }
                     values[x + z * side] |= ChunkMask.DETAILED;
+                    int[] surfaces = mesh.chunkSurfaces;
+                    if (surfaces != null) {
+                        int perSide = mesh.pos.size() / 16;
+                        int chunk = (int) ((chunkMinX - mesh.pos.minX()) / 16 + (chunkMinZ - mesh.pos.minZ()) / 16 * perSide);
+                        // The lowest block of the chunk the tile shows; nothing shown, nothing to lie under.
+                        int low = chunk * 2 < surfaces.length ? surfaces[chunk * 2] : Integer.MAX_VALUE;
+                        if (low != Integer.MAX_VALUE) {
+                            int floor = low - 1;
+                            int known = floors[x + z * side];
+                            floors[x + z * side] = known == LodView.NO_FLOOR ? floor : Math.min(known, floor);
+                        }
+                    }
                 }
             }
         }
@@ -260,14 +286,20 @@ public final class LodManager {
                 }
             }
         }
+        int minY = this.view.worldMinY;
+        for (int i = 0; i < values.length; i++) {
+            if (floors[i] != LodView.NO_FLOOR) {
+                values[i] |= Mth.clamp(floors[i] - minY + 1, 1, ChunkMask.MAX_FLOOR) << ChunkMask.FLOOR_SHIFT;
+            }
+        }
         ChunkMask last = this.chunkMask;
         float reach = this.minecraft.options.getEffectiveRenderDistance() * 16.0F;
         if (last.half() == half && last.originX() == this.drawnX && last.originZ() == this.drawnZ && last.reach() == reach
-            && Arrays.equals(last.values(), values)) {
+            && last.minY() == minY && Arrays.equals(last.values(), values)) {
             return;
         }
         this.nextMaskValues = last.values().length == values.length ? last.values() : new int[values.length];
-        this.chunkMask = new ChunkMask(values, half, this.drawnX, this.drawnZ, reach, ++this.maskVersion);
+        this.chunkMask = new ChunkMask(values, half, this.drawnX, this.drawnZ, reach, minY, ++this.maskVersion);
     }
 
     /** Detailed tiles know which of their squares of this many blocks have all their blocks, see TileMesh.coverage. */
@@ -293,9 +325,12 @@ public final class LodManager {
 
     private void checkUnderground(ClientLevel level) {
         BlockPos camera = BlockPos.containing(this.view.camX, this.view.camY, this.view.camZ);
+        // Deep in the sea there is no sky light either, and the heightmap stops at the surface of the water: in water the camera is
+        // never underground, whatever lies over it.
         this.enclosedUnderground = level.dimensionType().hasSkyLight()
             && camera.getY() < level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, camera.getX(), camera.getZ()) - UNDERGROUND_DEPTH
-            && level.getBrightness(LightLayer.SKY, camera) == 0;
+            && level.getBrightness(LightLayer.SKY, camera) == 0
+            && level.getFluidState(camera).isEmpty();
     }
 
     public List<TileMesh> drawList() {
@@ -490,6 +525,8 @@ public final class LodManager {
             this.config.dimension = DimensionKind.of(level);
             this.rough.setFloating(this.config.dimension == DimensionKind.END);
             this.view.extendCloudFarPlane = this.config.extendCloudFarPlane;
+            // A shader pack replaces vanilla's main pass with its own: the LOD terrain keeps its pass of its own then.
+            LodRenderer.mainPassPrototype = this.config.newRenderer && !IrisCompat.shadersActive();
         }
         if (!this.isActive() || level == null) {
             if (this.rough.hasWork() || this.detail.hasWork()) {
@@ -538,7 +575,6 @@ public final class LodManager {
             this.rough.walkAgain();
         }
         this.rough.select(this.view, this.tick, now);
-        this.rough.applyDetailCutout(ringRadius, fade);
         phaseStart = this.tickPhase(2, phaseStart);
         if (this.tick % FULLY_DRAWN_INTERVAL == 0) {
             this.fullyDrawnRadius = this.view.fullyDrawnRadius(this.minecraft.options.getEffectiveRenderDistance());
@@ -556,8 +592,9 @@ public final class LodManager {
                 for (int value : this.chunkMask.values()) {
                     detailed += (value & ChunkMask.DETAILED) != 0 ? 1 : 0;
                 }
-                LOGGER.info("[FarPlane chunks] half={} chunks={} drawn by vanilla={} detailed={} fullyDrawnRadius={} vanillaRadius={} detailRing={}",
-                    half, this.drawnChunks.length, drawn, detailed, Math.round(this.fullyDrawnRadius), Math.round(this.vanillaRadius()), Math.round(this.detailRingRadius));
+                LOGGER.info("[FarPlane chunks] half={} chunks={} drawn by vanilla={} detailed={} fullyDrawnRadius={} vanillaRadius={} detailRing={} nearest not drawn: {}",
+                    half, this.drawnChunks.length, drawn, detailed, Math.round(this.fullyDrawnRadius), Math.round(this.vanillaRadius()), Math.round(this.detailRingRadius),
+                    this.view.fullyDrawnReason);
             }
         }
         this.updateChunkMask();
@@ -567,9 +604,11 @@ public final class LodManager {
         phaseStart = this.tickPhase(3, phaseStart);
         this.cullHidden(ringRadius);
         phaseStart = this.tickPhase(4, phaseStart);
+        this.edgeMeshes.clear();
+        this.edgeChunks.clear();
         if (ringRadius > 0.0) {
             for (TileMesh mesh : this.detail.drawList()) {
-                this.vanillaFreeRanges(mesh);
+                this.vanillaFreeRanges(mesh, true);
             }
         }
         phaseStart = this.tickPhase(5, phaseStart);
@@ -656,15 +695,73 @@ public final class LodManager {
         }
     }
 
+    /** Whether the middle of a chunk lies near the edge of vanilla's render distance, where it starts or stops drawing chunks. */
+    private boolean alongVanillaEdge(int chunkX, int chunkZ) {
+        double dx = chunkX * 16.0 + 8.0 - this.view.camX;
+        double dz = chunkZ * 16.0 + 8.0 - this.view.camZ;
+        double distance = Math.sqrt(dx * dx + dz * dz);
+        double edge = this.minecraft.options.getEffectiveRenderDistance() * 16.0;
+        return distance > edge - EDGE_INSIDE && distance < edge + EDGE_OUTSIDE;
+    }
+
     /** Blocks the camera may move before culling is done again, on top of twice the distance of the last tick. */
     private static final double HIDDEN_MARGIN = 2.0;
 
     /**
+     * The chunks of detailed tiles along the edge of what vanilla draws, as they were last worked out, see {@link #frameCheck}: per
+     * chunk its tile, then {@link #EDGE_FIELDS} ints: the chunk, the lowest and highest block the tile has in it, and what vanilla drew
+     * of it (the coverage, its sections and the lowest of them).
+     */
+    private final ArrayList<TileMesh> edgeMeshes = new ArrayList<>();
+    private final it.unimi.dsi.fastutil.ints.IntArrayList edgeChunks = new it.unimi.dsi.fastutil.ints.IntArrayList();
+    private static final int EDGE_FIELDS = 7;
+    /** How far inside and outside vanilla's render distance chunks count as along its edge, in blocks. */
+    private static final double EDGE_INSIDE = 40.0;
+    private static final double EDGE_OUTSIDE = 24.0;
+    private final java.util.ArrayList<TileMesh> changedEdgeMeshes = new java.util.ArrayList<>();
+
+    /**
+     * Once a frame, right before the LOD terrain is drawn, after Sodium (or vanilla) has taken in the sections it built for this frame:
+     * the chunks along the edge of what vanilla draws are asked again, and the tiles where vanilla started or stopped drawing one leave
+     * it out or take it back in this very frame. Worked out only every tick, both would draw a chunk at once for a moment, or neither.
+     * Only the edge is asked: inside it what vanilla draws hardly changes.
+     */
+    public void frameCheck(double camX, double camY, double camZ) {
+        if (this.edgeMeshes.isEmpty()) {
+            return;
+        }
+        this.view.frameCamera(camX, camY, camZ);
+        List<TileMesh> changed = this.changedEdgeMeshes;
+        changed.clear();
+        int[] chunks = this.edgeChunks.elements();
+        for (int i = 0; i < this.edgeMeshes.size(); i++) {
+            TileMesh mesh = this.edgeMeshes.get(i);
+            int at = i * EDGE_FIELDS;
+            if (mesh.vertices.isClosed()) {
+                continue;
+            }
+            LodView.Coverage coverage = this.view.coverage(chunks[at], chunks[at + 1], chunks[at + 2], chunks[at + 3]);
+            if (coverage.ordinal() == chunks[at + 4] && this.view.drawnSections == chunks[at + 5] && this.view.lowestSection == chunks[at + 6]) {
+                continue;
+            }
+            chunks[at + 4] = coverage.ordinal();
+            chunks[at + 5] = this.view.drawnSections;
+            chunks[at + 6] = this.view.lowestSection;
+            if (changed.isEmpty() || changed.get(changed.size() - 1) != mesh) {
+                changed.add(mesh);
+            }
+        }
+        for (TileMesh mesh : changed) {
+            this.vanillaFreeRanges(mesh, false);
+        }
+    }
+
+    /**
      * Detailed blocks under vanilla chunks would show through the gaps of grass and leaves as ghost blocks, so the chunks of a tile
      * that vanilla already draws are left out. Chunks vanilla draws only partly, seen from high above for example, are drawn without
-     * the layer vanilla draws.
+     * the layer vanilla draws. {@code record}: remember the chunks along the edge of what vanilla draws, see {@link #frameCheck}.
      */
-    private void vanillaFreeRanges(TileMesh mesh) {
+    private void vanillaFreeRanges(TileMesh mesh, boolean record) {
         mesh.drawRanges = null;
         mesh.clippedChunks = null;
         int[] segments = mesh.segments;
@@ -681,7 +778,8 @@ public final class LodManager {
             }
         }
         boolean nearVanilla = mesh.pos.distanceTo(this.view.camX, this.view.camZ) <= this.view.vanillaRadius + 32.0;
-        // Grass and flowers are only drawn a little beyond vanilla's chunks; farther out they are too small to see.
+        // Grass and flowers are only drawn a little beyond vanilla's chunks; farther out they are too small to see. Glowing things in
+        // the water (sea pickles) come before them in every chunk and go farther, see GLOW_REACH.
         double plantReach = Math.max(PLANT_MIN_REACH, this.view.vanillaRadius + PLANT_REACH_BEYOND_VANILLA);
         boolean cutPlants = plants != null && mesh.pos.farthestDistanceTo(this.view.camX, this.view.camZ) > plantReach;
         if (!nearVanilla && !cutPlants && !anyHidden) {
@@ -711,6 +809,16 @@ public final class LodManager {
                 coverage[chunk] = this.view.coverage(chunkX, chunkZ, surfaces[chunk * 2], surfaces[chunk * 2 + 1]);
                 masks[chunk] = this.view.drawnSections;
                 lowest[chunk] = this.view.lowestSection;
+                if (record && this.alongVanillaEdge(chunkX, chunkZ)) {
+                    this.edgeMeshes.add(mesh);
+                    this.edgeChunks.add(chunkX);
+                    this.edgeChunks.add(chunkZ);
+                    this.edgeChunks.add(surfaces[chunk * 2]);
+                    this.edgeChunks.add(surfaces[chunk * 2 + 1]);
+                    this.edgeChunks.add(coverage[chunk].ordinal());
+                    this.edgeChunks.add(masks[chunk]);
+                    this.edgeChunks.add(lowest[chunk]);
+                }
             } else {
                 coverage[chunk] = LodView.Coverage.NONE;
                 masks[chunk] = 0;
@@ -727,8 +835,12 @@ public final class LodManager {
             if (cutPlants) {
                 double dx = chunkX * 16.0 + 8.0 - this.view.camX;
                 double dz = chunkZ * 16.0 + 8.0 - this.view.camZ;
-                if (Math.sqrt(dx * dx + dz * dz) - 8.0 > plantReach) {
-                    ends[chunk] = plants[chunk];
+                double distance = Math.sqrt(dx * dx + dz * dz) - 8.0;
+                if (distance > GLOW_REACH) {
+                    ends[chunk] = plants[chunk * 2];
+                    anyCut = true;
+                } else if (distance > plantReach) {
+                    ends[chunk] = plants[chunk * 2 + 1];
                     anyCut = true;
                 }
             }
@@ -803,6 +915,8 @@ public final class LodManager {
     /** Grass and flowers of detailed tiles are drawn this far beyond vanilla's chunks, and at least {@link #PLANT_MIN_REACH} blocks. */
     private static final double PLANT_REACH_BEYOND_VANILLA = 64.0;
     private static final double PLANT_MIN_REACH = 128.0;
+    /** How far glowing things in the water (sea pickles) and their light are drawn: 48 chunks. */
+    private static final double GLOW_REACH = 48 * 16.0;
 
     /** Queued meshes are dropped; running ones finish. Nothing is interrupted, see {@link WorkThrottle.Worker}. */
     public void close() {

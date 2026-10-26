@@ -1,6 +1,7 @@
 package com.Evga314.farplanetwocontinuation.client.lod;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
+import com.Evga314.farplanetwocontinuation.WorkThrottle;
 import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -207,14 +208,24 @@ abstract class LodLayer {
         this.retired.clear();
     }
 
-    /** Every tile of this layer over a chunk counts as outdated: it is shown until fresh data arrives, which is asked for when drawn. */
+    /**
+     * Every tile of this layer over a chunk counts as outdated: it is shown until fresh data arrives, which is asked for when drawn
+     * and one of its changed chunks can be seen, see {@link #changeVisible}.
+     */
     void markChanged(int chunkX, int chunkZ) {
+        long chunk = net.minecraft.world.level.ChunkPos.pack(chunkX, chunkZ);
         for (int level = this.lowestLevel(); level <= this.maxLevel(); level++) {
             long size = FarPlaneConstants.tileSize(level);
             long key = new TilePos(level, (int) Math.floorDiv(chunkX * 16L, size), (int) Math.floorDiv(chunkZ * 16L, size)).pack();
             TileMesh mesh = this.meshes.get(key);
             if (mesh != null) {
                 mesh.changedAt = Util.getMillis();
+                if (mesh.changedChunks == null) {
+                    mesh.changedChunks = new it.unimi.dsi.fastutil.longs.LongArrayList(4);
+                }
+                if (!mesh.changedChunks.contains(chunk)) {
+                    mesh.changedChunks.add(chunk);
+                }
             }
             this.empty.remove(key);
         }
@@ -259,9 +270,10 @@ abstract class LodLayer {
             this.meshExecutor.execute(() -> {
                 try {
                     long start = PerfLog.ON ? System.nanoTime() : 0L;
+                    long paused = WorkThrottle.pausedNanos();
                     this.built.add(work.run(buildEpoch));
                     if (PerfLog.ON) {
-                        PerfLog.meshBuilt(this.detail, System.nanoTime() - start);
+                        PerfLog.meshBuilt(this.detail, System.nanoTime() - start, WorkThrottle.pausedNanos() - paused);
                     }
                 } catch (Exception e) {
                     LOGGER.debug("Dropping bad {} tile {}", this.name, TilePos.unpack(key), e);
@@ -726,13 +738,61 @@ abstract class LodLayer {
         mesh.keepRadius = 0.0F;
         mesh.fadeWidth = 0.0F;
         this.nextDrawList.add(mesh);
-        if (mesh.changedAt > mesh.receivedAt && this.now - mesh.receivedAt > CHANGED_REFRESH_MS) {
+        boolean changed = mesh.changedAt > mesh.receivedAt && this.now - mesh.receivedAt > CHANGED_REFRESH_MS;
+        if (changed && this.changeVisible(mesh)) {
             // Changed blocks are as urgent as a missing tile: the old mesh stays on screen only until the new one arrives. As a
             // background refresh it would wait behind every tile still loading, which while flying around is forever.
             this.enqueue(mesh.pos, this.priority(mesh.pos, distance), false);
+            if (PerfLog.ON && !mesh.changeRefreshCounted) {
+                mesh.changeRefreshCounted = true;
+                PerfLog.changedRefresh(false);
+                if (this.anyChangeHidden(mesh)) {
+                    PerfLog.changedRefreshMixed();
+                }
+            }
+        } else if (changed) {
+            if (PerfLog.ON && !mesh.changeDeferCounted) {
+                mesh.changeDeferCounted = true;
+                PerfLog.changedRefresh(true);
+            }
         } else if (this.now - mesh.receivedAt > this.refreshIntervalMs(mesh)) {
             this.enqueue(mesh.pos, REFRESH_PRIORITY + distance / mesh.pos.size(), false);
         }
+    }
+
+    /**
+     * Whether a changed chunk of a tile can be seen: one vanilla does not show the real blocks of, see {@link LodView#vanillaHasChunk}.
+     * Changes vanilla shows, where the detailed tile is hidden anyway (the player building), wait until the player has moved away.
+     */
+    private boolean changeVisible(TileMesh mesh) {
+        it.unimi.dsi.fastutil.longs.LongArrayList chunks = mesh.changedChunks;
+        LodView view = this.view;
+        if (chunks == null || view == null) {
+            return true;
+        }
+        for (int i = 0; i < chunks.size(); i++) {
+            long chunk = chunks.getLong(i);
+            if (!view.vanillaHasChunk(net.minecraft.world.level.ChunkPos.getX(chunk), net.minecraft.world.level.ChunkPos.getZ(chunk))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether one of the changed chunks of a tile is shown by vanilla; for the performance log. */
+    private boolean anyChangeHidden(TileMesh mesh) {
+        it.unimi.dsi.fastutil.longs.LongArrayList chunks = mesh.changedChunks;
+        LodView view = this.view;
+        if (chunks == null || view == null) {
+            return false;
+        }
+        for (int i = 0; i < chunks.size(); i++) {
+            long chunk = chunks.getLong(i);
+            if (view.vanillaHasChunk(net.minecraft.world.level.ChunkPos.getX(chunk), net.minecraft.world.level.ChunkPos.getZ(chunk))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** @param hole nothing of this layer is drawn where the tile goes, see {@link FarPlanePayloads#REQUEST_HOLE} */

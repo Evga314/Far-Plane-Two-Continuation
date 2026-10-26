@@ -31,14 +31,17 @@ final class ChunkSummaryCache {
         }
     };
 
-    /** The cached state of a chunk: {@code null} when unknown, a lookup without summary when the chunk has no data. */
-    synchronized @Nullable Lookup get(Identifier dimension, long chunk) {
+    /**
+     * The cached state of a chunk: {@code null} when unknown, a lookup without summary when the chunk has no data. A summary made
+     * with another scan (the depth was changed) counts as unknown.
+     */
+    synchronized @Nullable Lookup get(Identifier dimension, long chunk, ChunkSummary.Scan scan) {
         Cached entry = this.entries.get(new Key(dimension, chunk));
         if (entry == null) {
             return null;
         }
         long age = Util.getMillis() - entry.created;
-        if (age > (entry.summary == null ? MISSING_TTL_MS : SAVED_TTL_MS)) {
+        if (age > (entry.summary == null ? MISSING_TTL_MS : SAVED_TTL_MS) || entry.summary != null && !entry.summary.scan().equals(scan)) {
             this.entries.remove(new Key(dimension, chunk));
             return null;
         }

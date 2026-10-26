@@ -66,11 +66,22 @@ public class DetailConfigScreen extends OptionsSubScreen {
             value -> config.blockDetail = value
         );
 
+        int step = FarPlaneConstants.SCAN_DEPTH_STEP;
+        OptionInstance<Integer> depth = new OptionInstance<>(
+            PREFIX + "depth",
+            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "depth.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, Component.translatable(PREFIX + "depth.blocks", value * step)),
+            new OptionInstance.IntRange(FarPlaneConstants.MIN_SCAN_DEPTH / step, FarPlaneConstants.MAX_SCAN_DEPTH / step),
+            config.scanDepth / step,
+            value -> config.scanDepth = value * step
+        );
+
         this.list.addBig(enabled);
         this.list.addBig(generate);
         this.list.addBig(radius);
         this.list.addBig(blocks);
         this.list.addBig(memory);
+        this.list.addBig(depth);
     }
 
     @Override

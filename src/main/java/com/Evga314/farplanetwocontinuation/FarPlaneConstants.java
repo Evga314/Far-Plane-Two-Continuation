@@ -6,7 +6,7 @@ public final class FarPlaneConstants {
         || System.getProperty("os.version", "").toLowerCase(java.util.Locale.ROOT).contains("android");
 
     public static final String MOD_ID = "farplanetwocontinuation";
-    public static final int PROTOCOL_VERSION = 12;
+    public static final int PROTOCOL_VERSION = 17;
 
     /** Cells along one tile edge. A tile holds TILE_CELLS + 1 samples per edge so neighbours share border samples. */
     public static final int TILE_CELLS = 32;
@@ -31,6 +31,16 @@ public final class FarPlaneConstants {
     public static final int DETAIL_MIN_LEVEL = 1;
     public static final int DETAIL_MAX_LEVEL = 3;
     public static final int MAX_DETAIL_RADIUS_CHUNKS = 256;
+    /**
+     * How many blocks down from the top of a column detailed tiles look, see the chunk summary of the server. Deeper than that the
+     * last block found goes on to the bottom of the world. In steps of {@link #SCAN_DEPTH_STEP}.
+     */
+    public static final int MIN_SCAN_DEPTH = 16;
+    public static final int MAX_SCAN_DEPTH = 256;
+    public static final int SCAN_DEPTH_STEP = 16;
+    public static final int DEFAULT_SCAN_DEPTH = 96;
+    /** End cities stand high over their islands; the islands themselves are thin and low, so this costs little more. */
+    public static final int DEFAULT_END_SCAN_DEPTH = 192;
 
     private FarPlaneConstants() {
     }

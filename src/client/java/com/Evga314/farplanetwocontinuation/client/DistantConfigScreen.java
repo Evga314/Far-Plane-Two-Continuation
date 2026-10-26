@@ -12,7 +12,6 @@ import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.OptionsSubScreen;
 import net.minecraft.network.chat.Component;
-import net.minecraft.util.Mth;
 
 /** Settings of the rough distant terrain, for one kind of dimension. */
 public class DistantConfigScreen extends OptionsSubScreen {
@@ -70,22 +69,9 @@ public class DistantConfigScreen extends OptionsSubScreen {
             GpuMemory.step((int) (config.maxGpuTiles * TILE_BYTES / (1024 * 1024))),
             value -> config.maxGpuTiles = (int) (GpuMemory.STEPS_MB[value] * 1024L * 1024L / TILE_BYTES)
         );
-        OptionInstance<Integer> fog = new OptionInstance<>(
-            PREFIX + "fog",
-            OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "fog.tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + "%")),
-            new OptionInstance.IntRange(10, 98),
-            Mth.clamp(Math.round(config.fogStart * 100.0F), 10, 98),
-            value -> config.fogStart = value / 100.0F
-        );
-        OptionInstance<Boolean> noFog = OptionInstance.createBoolean(
-            PREFIX + "no_fog", OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "no_fog.tooltip")), config.disableFog, value -> config.disableFog = value
-        );
-
         this.list.addBig(distance);
         this.list.addSmall(start, sharpness);
-        this.list.addSmall(memory, fog);
-        this.list.addBig(noFog);
+        this.list.addBig(memory);
         if (this.dimension == DimensionKind.OVERWORLD) {
             this.list.addSmall(this.bordersButton("smoothing", config, false), this.bordersButton("blur", config, true));
         }

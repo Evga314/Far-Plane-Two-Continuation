@@ -3,6 +3,7 @@ package com.Evga314.farplanetwocontinuation.server;
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.WorkThrottle;
 import com.Evga314.farplanetwocontinuation.config.ServerConfig;
+import com.Evga314.farplanetwocontinuation.dimension.DimensionKind;
 import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
 import com.Evga314.farplanetwocontinuation.tile.DetailData;
 import com.Evga314.farplanetwocontinuation.tile.LoadOrder;
@@ -93,6 +94,8 @@ public final class TileServer {
             return this.size() > DETAIL_CACHE_TILES;
         }
     };
+    /** Scan depths the owner of a singleplayer world chose in the detailed terrain settings; they replace the config file there. */
+    private final Map<DimensionKind, Integer> ownerScanDepths = new ConcurrentHashMap<>();
 
     public TileServer(MinecraftServer server, ServerConfig config) {
         this.server = server;
@@ -623,11 +626,23 @@ public final class TileServer {
         this.accept(player, requests, false);
     }
 
-    public void onDetailRequest(ServerPlayer player, int[] requests, boolean generate, float urgency) {
+    public void onDetailRequest(ServerPlayer player, int[] requests, boolean generate, float urgency, int scanDepth) {
         PlayerState state = this.players.computeIfAbsent(player.getUUID(), uuid -> new PlayerState());
         state.generateVirtual = generate;
         state.urgency = urgency;
+        // Only the owner of a singleplayer world chooses the depth; the summaries it makes are shared by everyone.
+        if (scanDepth > 0 && this.server.isSingleplayerOwner(player.nameAndId())) {
+            this.ownerScanDepths.put(DimensionKind.of(player.level()), ServerConfig.scanDepth(scanDepth));
+        }
         this.accept(player, requests, true);
+    }
+
+    /** How the columns of a level are scanned for detailed tiles. */
+    private ChunkSummary.Scan scan(ServerLevel level) {
+        DimensionKind kind = DimensionKind.of(level);
+        Integer chosen = this.ownerScanDepths.get(kind);
+        int depth = chosen != null ? chosen : kind == DimensionKind.END ? this.config.detailScanDepthEnd : this.config.detailScanDepth;
+        return new ChunkSummary.Scan(depth, kind == DimensionKind.END);
     }
 
     private void accept(ServerPlayer player, int[] requests, boolean detail) {
@@ -731,9 +746,15 @@ public final class TileServer {
                     byte[] result = null;
                     try {
                         long start = ServerPerf.ON ? System.nanoTime() : 0L;
+                        long cpu = ServerPerf.cpu();
+                        long paused = WorkThrottle.pausedNanos();
                         result = job.detail() ? this.produceDetail(level, job.pos(), loaded, virtual) : this.produce(level, job.pos());
                         if (ServerPerf.ON) {
                             (job.detail() ? ServerPerf.DETAIL : ServerPerf.ROUGH).add(System.nanoTime() - start);
+                            if (job.detail()) {
+                                ServerPerf.DETAIL_CPU.add(ServerPerf.cpu() - cpu);
+                                ServerPerf.DETAIL_PAUSED.add(WorkThrottle.pausedNanos() - paused);
+                            }
                         }
                     } catch (WorkThrottle.Cancelled e) {
                         return;
@@ -823,17 +844,27 @@ public final class TileServer {
      */
     private byte[] produceDetail(ServerLevel level, TilePos pos, Long2ObjectMap<LevelChunk> loaded, @Nullable VirtualChunkStore virtual) {
         CacheKey key = new CacheKey(level.dimension().identifier(), pos.pack());
+        ChunkSummary.Scan scan = this.scan(level);
         long now = Util.getMillis();
         synchronized (this.detailCache) {
             DetailEntry cached = this.detailCache.get(key);
-            if (cached != null && now - cached.created() < (cached.complete() ? DETAIL_CACHE_MS : INCOMPLETE_DETAIL_CACHE_MS)) {
+            if (cached != null && cached.scan().equals(scan)
+                && now - cached.created() < (cached.complete() ? DETAIL_CACHE_MS : INCOMPLETE_DETAIL_CACHE_MS)) {
                 return cached.data();
             }
         }
-        DetailData data = DetailGenerator.generate(level, pos, loaded, this.config.detailReadSavedChunks ? this.chunkSummaries : null, virtual);
+        DetailData data = DetailGenerator.generate(level, pos, loaded, this.config.detailReadSavedChunks ? this.chunkSummaries : null, virtual, scan);
+        long encodeStart = ServerPerf.ON ? System.nanoTime() : 0L;
         byte[] encoded = data.encode();
+        if (ServerPerf.ON) {
+            ServerPerf.DETAIL_ENCODE.add(System.nanoTime() - encodeStart);
+            ServerPerf.DETAIL_PACKETS.incrementAndGet();
+            ServerPerf.DETAIL_PACKET_BYTES.addAndGet(encoded.length);
+            ServerPerf.DETAIL_PACKET_MAX.accumulateAndGet(encoded.length, Math::max);
+            ServerPerf.DETAIL_RAW_BYTES.addAndGet(data.rawSize());
+        }
         synchronized (this.detailCache) {
-            this.detailCache.put(key, new DetailEntry(encoded, now, data.isComplete()));
+            this.detailCache.put(key, new DetailEntry(encoded, now, data.isComplete(), scan));
         }
         return encoded;
     }
@@ -1086,7 +1117,7 @@ public final class TileServer {
         }
     }
 
-    private record DetailEntry(byte[] data, long created, boolean complete) {
+    private record DetailEntry(byte[] data, long created, boolean complete, ChunkSummary.Scan scan) {
     }
 
     private static final class PlayerState {

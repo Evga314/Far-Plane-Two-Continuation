@@ -32,6 +32,12 @@ public class ServerConfig {
     public boolean detailGenerateUnexplored = true;
     /** Threads for detailed tiles, separate from the generator threads. 0 picks a value based on the CPU core count. */
     public int detailThreads = 0;
+    /**
+     * How many blocks down from the top of a column detailed tiles look, in the End and everywhere else. In singleplayer the owner of
+     * the world sets it in the detailed terrain settings instead. Changing it makes the chunks generated in memory again.
+     */
+    public int detailScanDepth = FarPlaneConstants.DEFAULT_SCAN_DEPTH;
+    public int detailScanDepthEnd = FarPlaneConstants.DEFAULT_END_SCAN_DEPTH;
 
     public void sanitize() {
         this.maxDistance = Mth.clamp(this.maxDistance, FarPlaneConstants.MIN_LOD_DISTANCE, FarPlaneConstants.MAX_LOD_DISTANCE);
@@ -42,6 +48,14 @@ public class ServerConfig {
         this.maxInFlightPerPlayer = Mth.clamp(this.maxInFlightPerPlayer, 1, 64);
         this.memoryCacheTiles = Mth.clamp(this.memoryCacheTiles, 0, 65536);
         this.detailMaxRadiusChunks = Mth.clamp(this.detailMaxRadiusChunks, 0, FarPlaneConstants.MAX_DETAIL_RADIUS_CHUNKS);
+        this.detailScanDepth = scanDepth(this.detailScanDepth);
+        this.detailScanDepthEnd = scanDepth(this.detailScanDepthEnd);
+    }
+
+    /** A scan depth within the limits, rounded to a whole step. */
+    public static int scanDepth(int depth) {
+        int step = FarPlaneConstants.SCAN_DEPTH_STEP;
+        return Mth.clamp((depth + step / 2) / step * step, FarPlaneConstants.MIN_SCAN_DEPTH, FarPlaneConstants.MAX_SCAN_DEPTH);
     }
 
     public int resolvedThreads() {

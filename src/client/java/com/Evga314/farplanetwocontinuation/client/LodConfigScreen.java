@@ -6,7 +6,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.Button;
-import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.OptionsSubScreen;
 import net.minecraft.network.chat.Component;
@@ -49,26 +48,16 @@ public class LodConfigScreen extends OptionsSubScreen {
         this.list.addBig(Button.builder(Component.translatable(PREFIX + "detail_settings"), button -> this.open(new DimensionChoiceScreen(
             this, Component.translatable(PREFIX + "detailed.title"), DetailConfigScreen::new
         ))).build());
+        this.list.addBig(Button.builder(Component.translatable(PREFIX + "fog_settings"), button -> this.open(new DimensionChoiceScreen(
+            this, Component.translatable(PREFIX + "fog.title"), FogConfigScreen::new
+        ))).build());
         this.list.addBig(Button.builder(Component.translatable(PREFIX + "other_settings"), button -> this.open(new OtherConfigScreen(this))).build());
-        this.list.addBig(Button.builder(Component.translatable(PREFIX + "clear_cache"), button -> this.confirmClearCache()).build());
     }
 
     private void open(Screen screen) {
         if (this.minecraft != null) {
             this.minecraft.gui.setScreen(screen);
         }
-    }
-
-    private void confirmClearCache() {
-        if (this.minecraft == null) {
-            return;
-        }
-        this.minecraft.gui.setScreen(new ConfirmScreen(confirmed -> {
-            if (confirmed) {
-                FarplanetwocontinuationClient.manager().reloadAll();
-            }
-            this.minecraft.gui.setScreen(this);
-        }, Component.translatable(PREFIX + "clear_cache.title"), Component.translatable(PREFIX + "clear_cache.message")));
     }
 
     @Override

@@ -34,7 +34,7 @@ final class TileMesh implements AutoCloseable {
     final int @Nullable [] segments;
     /** Per chunk, the lowest and highest block with a drawn top or underside; see {@code DetailMeshBuilder.surfaceRange}. */
     final int @Nullable [] chunkSurfaces;
-    /** Per chunk the first quad of its plants, which come last in the chunk; null without plants. */
+    /** Per chunk the first quad of its glowing things and of its plants, two per chunk, which come last in it; null without. */
     final int @Nullable [] chunkPlants;
     /** Detailed tiles drawn with block textures, in the larger vertex format. */
     final boolean textured;
@@ -56,6 +56,11 @@ final class TileMesh implements AutoCloseable {
     long receivedAt;
     /** When blocks under this tile last changed, 0 if never. */
     long changedAt;
+    /** Chunks whose blocks changed since the data arrived, as packed chunk positions; null when none did. */
+    it.unimi.dsi.fastutil.longs.@Nullable LongArrayList changedChunks;
+    /** Whether the refresh for changed blocks was counted in the performance log already, and whether a put-off one was. */
+    boolean changeRefreshCounted;
+    boolean changeDeferCounted;
     /**
      * Index ranges to draw this frame as pairs of first index and count, leaving out chunks vanilla already draws. Null draws
      * everything. Set every tick.
@@ -118,7 +123,22 @@ final class TileMesh implements AutoCloseable {
     static final int GROUP_SOUTH = 4;
     static final int GROUP_EAST = 5;
     static final int GROUP_DOWN = 6;
-    static final int GROUPS = 7;
+    /**
+     * Translucent water, whichever way it faces, last of all: only the water passes draw it, and they draw nothing else, see
+     * {@link #waterStart}.
+     */
+    static final int GROUP_WATER = 7;
+    static final int GROUPS = 8;
+
+    /** Detailed tiles: the first index of the translucent water, which comes after everything else; the index count without any. */
+    int waterStart() {
+        int[] segments = this.segments;
+        if (segments == null) {
+            return this.indexCount;
+        }
+        int chunks = segments.length / GROUPS;
+        return segments[GROUP_WATER * chunks] * 6;
+    }
 
     /** Height of the LOD surface at a world position inside this tile, interpolated the same way the mesh is drawn. */
     float heightAt(double x, double z) {

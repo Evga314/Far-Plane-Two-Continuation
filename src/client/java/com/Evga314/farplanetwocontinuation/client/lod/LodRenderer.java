@@ -338,6 +338,21 @@ public final class LodRenderer {
             .build()
     );
 
+    /** Walls of water along the edge of what vanilla draws, see VanillaWall. Seen from both sides. */
+    public static final RenderPipeline VANILLA_WALL_PIPELINE = RenderPipelines.registerOptional(
+        RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
+            .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_vanilla_wall"))
+            .withVertexShader(SHADER)
+            .withFragmentShader(SHADER)
+            .withShaderDefine("VANILLA_WALL")
+            .withVertexBinding(0, DefaultVertexFormat.POSITION_COLOR)
+            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+            .withColorTargetState(ColorTargetState.DEFAULT)
+            .withDepthStencilState(DepthStencilState.DEFAULT)
+            .withCull(false)
+            .build()
+    );
+
     /** Translucent water of detailed tiles, drawn after everything else without writing depth, so the ground under it shows. */
     public static final RenderPipeline DETAIL_WATER_PIPELINE = RenderPipelines.registerOptional(
         RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
@@ -583,8 +598,6 @@ public final class LodRenderer {
         double camX = camera.pos.x;
         double camY = camera.pos.y;
         double camZ = camera.pos.z;
-        // What vanilla draws along its edge is asked once a frame, before the tiles are culled and their transforms are made.
-        this.manager.frameCheck(camX, camY, camZ);
 
         Matrix4f base = camera.projectionMatrix;
         float fovY = 2.0F * (float) Math.atan(1.0 / base.m11());
@@ -601,6 +614,16 @@ public final class LodRenderer {
         this.cullMatrix.set(this.lodProjection).mul(camera.viewRotationMatrix);
         this.frustum.set(this.cullMatrix, false);
         LodView.lastView(this.cullMatrix, camX, camY, camZ);
+        // What vanilla draws along its edge is asked once a frame, in the view of this frame, before the tiles are culled and their
+        // transforms are made.
+        long phase = PerfLog.ON ? System.nanoTime() : 0L;
+        if (PerfLog.ON) {
+            this.manager.watchSodiumFrame();
+        }
+        this.manager.frameCheck(camX, camY, camZ);
+        if (PerfLog.ON) {
+            phase = PerfLog.renderPhase(0, phase);
+        }
         this.visible.clear();
         this.depthTiles.clear();
         double nearest = Double.MAX_VALUE;
@@ -675,6 +698,9 @@ public final class LodRenderer {
                 maxQuads = Math.max(maxQuads, mesh.indexCount / 6);
             }
         }
+        if (PerfLog.ON) {
+            phase = PerfLog.renderPhase(1, phase);
+        }
         if (this.visible.isEmpty()) {
             return;
         }
@@ -682,6 +708,9 @@ public final class LodRenderer {
         // within a kind near tiles first, so the depth test rejects most hidden fragments early. Detailed tiles are the near ones anyway.
         this.visible.sort(DRAW_ORDER);
         this.depthTiles.sort(DRAW_ORDER);
+        if (PerfLog.ON) {
+            phase = PerfLog.renderPhase(2, phase);
+        }
 
         float far = (float) (farthest * 1.02 + 16.0);
         // The near plane is perpendicular to the view direction, so a point at distance d near the screen corner is only
@@ -718,9 +747,15 @@ public final class LodRenderer {
         int floorIndex = this.visible.size();
         boolean wall = wallRadius > 0.0F && hasSky;
         int wallIndex = floorIndex + (floor ? 1 : 0);
+        // Walls of water along the edge of vanilla's chunks, seen from above the water through vanilla's, see VanillaWall. Only without
+        // the detailed tiles: with them their water and ground lie beyond vanilla's, and a wall flashed up wherever a tile was not marked
+        // in the mask for a moment.
+        boolean vanillaWall = floor && camera.fogType == FogType.NONE && this.manager.detailRingRadius() <= 0.0
+            && this.updateVanillaWall(minecraft.level);
+        int vanillaWallIndex = wallIndex + (wall ? 1 : 0);
         // The wall darkens as the camera goes deeper, like vanilla's view under water.
         float cameraShade = Mth.lerp((float) Math.exp(-Math.max(0.0, waterTop - camY) / WALL_CAMERA_DEPTH), WALL_CAMERA_DEEPEST, 1.0F);
-        frame.begin(wallIndex + (wall ? 1 : 0));
+        frame.begin(vanillaWallIndex + (vanillaWall ? 1 : 0));
         boolean anyFade = false;
         boolean anyWater = false;
         for (int i = 0; i < this.visible.size(); i++) {
@@ -751,8 +786,9 @@ public final class LodRenderer {
             // [2][0]: the edge of the detailed tiles, where their water turns into the flat water of the rough terrain.
             cut.m20(mesh.detail ? ringRadius : 0.0F);
             cut.m33(overworldSky);
-            // [1][0]: the texture level textured detailed tiles always use, below 0 for vanilla's choice by distance.
-            cut.m10(textureLevel);
+            // [1][0]: the texture level textured detailed tiles always use, below 0 for vanilla's choice by distance; for rough tiles 1
+            // while the walls along vanilla's edge are drawn, which then leave no use for the rough water under vanilla's chunks.
+            cut.m10(mesh.detail ? textureLevel : vanillaWall ? 1.0F : 0.0F);
             if (!hasSky) {
                 cut.m30(NO_SKY_FOG_RED).m31(NO_SKY_FOG_GREEN).m32(NO_SKY_FOG_BLUE);
             } else if (wall) {
@@ -791,7 +827,21 @@ public final class LodRenderer {
             Vector3f offset = frame.offset(0.0F, (float) (waterTop - camY), 0.0F);
             frame.set(wallIndex, new DynamicGpuData.Transform(camera.viewRotationMatrix, modulator, offset, cut));
         }
+        if (vanillaWall) {
+            Matrix4f cut = frame.matrix().zero();
+            cut.m22(1.0F);
+            cut.m33(overworldSky);
+            // [0][0]: how far above and below the camera vanilla draws, see the shader.
+            cut.m00(this.manager.chunkMask().reach());
+            Vector3f offset = frame.offset(
+                (float) (this.vanillaWall.originX() - camX), (float) -camY, (float) (this.vanillaWall.originZ() - camZ)
+            );
+            frame.set(vanillaWallIndex, new DynamicGpuData.Transform(camera.viewRotationMatrix, modulator, offset, cut));
+        }
         GpuBufferSlice[] transformSlices = frame.write();
+        if (PerfLog.ON) {
+            phase = PerfLog.renderPhase(3, phase);
+        }
 
         if (this.projectionBuffer == null) {
             this.projectionBuffer = new ProjectionMatrixBuffer("farplane lod");
@@ -800,7 +850,11 @@ public final class LodRenderer {
         // The LOD terrain's own fog, see LodFog; vanilla's is bound again after it.
         GpuBufferSlice fogSlice = lodFog.write();
         GpuBuffer roughIndices = this.roughIndices();
-        GpuBuffer quadIndices = maxQuads > 0 || floor || wall ? this.quadIndices(Math.max(maxQuads, WALL_SEGMENTS * 2)) : null;
+        int indexQuads = Math.max(Math.max(maxQuads, WALL_SEGMENTS * 2), vanillaWall ? this.vanillaWall.quads() : 0);
+        GpuBuffer quadIndices = maxQuads > 0 || floor || wall || vanillaWall ? this.quadIndices(indexQuads) : null;
+        CompiledRenderPipeline vanillaWallPipeline = vanillaWall && quadIndices != null ? this.compiledPipeline(VANILLA_WALL_PIPELINE) : null;
+        GpuBuffer vanillaWallVertices = this.vanillaWall.buffer();
+        int vanillaWallQuads = this.vanillaWall.quads();
 
         this.frameChunkMask = this.uploadChunkMask(camX, camY, camZ);
         CompiledRenderPipeline roughPipeline = pipeline;
@@ -819,7 +873,11 @@ public final class LodRenderer {
         };
         CompiledRenderPipeline wallPipeline = wall && quadIndices != null ? this.compiledPipeline(WALL_PIPELINE) : null;
         GpuBuffer wallVertices = wallPipeline != null ? this.waterWall(wallRadius, (float) (waterTop - minecraft.level.getMinY())) : null;
+        if (PerfLog.ON) {
+            PerfLog.renderPhase(4, phase);
+        }
         java.util.function.Consumer<RenderPass> draw = pass -> {
+                long drawStart = PerfLog.ON ? System.nanoTime() : 0L;
                 pass.setUniform("Fog", fogSlice);
                 if (!inMain) {
                     // First of all, see FLOOR_PIPELINE.
@@ -832,6 +890,13 @@ public final class LodRenderer {
                 );
                 PerfLog.pass(0);
                 this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, rough);
+                if (vanillaWallPipeline != null && vanillaWallVertices != null) {
+                    pass.setPipeline(vanillaWallPipeline);
+                    pass.setIndexBuffer(quadIndices, IndexType.INT);
+                    pass.setUniform("DynamicTransforms", transformSlices[vanillaWallIndex]);
+                    pass.setVertexBuffer(0, vanillaWallVertices.slice(0, vanillaWallVertices.size()));
+                    pass.drawIndexed(vanillaWallQuads * 6, 1, 0, 0, 0);
+                }
                 // The patch draws only water fragments; floating tiles have none, and with the distance in the coast value it would
                 // take the land at their edges for water and draw fringes around the islands.
                 if (inMain) {
@@ -864,13 +929,20 @@ public final class LodRenderer {
                     pass.setVertexBuffer(0, wallVertices.slice(0, wallVertices.size()));
                     pass.drawIndexed(WALL_SEGMENTS * 2 * 6, 1, 0, 0, 0);
                 }
+                if (PerfLog.ON) {
+                    PerfLog.renderPhase(5, drawStart);
+                }
         };
         CompiledRenderPipeline waterPipeline = waterTiles ? this.compiledPipeline(DETAIL_WATER_PIPELINE) : null;
         java.util.function.Consumer<RenderPass> drawWater = pass -> {
             if (waterPipeline != null) {
+                long waterStart = PerfLog.ON ? System.nanoTime() : 0L;
                 pass.setUniform("Fog", fogSlice);
                 PerfLog.pass(4);
                 this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, new Pipelines(null, null, waterPipeline, true, true, false));
+                if (PerfLog.ON) {
+                    PerfLog.renderPhase(6, waterStart);
+                }
             }
         };
         if (inMain) {
@@ -890,8 +962,12 @@ public final class LodRenderer {
             draw.accept(pass);
             drawWater.accept(pass);
         }
+        long depthStart = PerfLog.ON ? System.nanoTime() : 0L;
         encoder.clearDepthTexture(target.getDepthTexture(), 0.0);
         this.writeVanillaDepth(target, camera, fog, encoder, camX, camY, camZ, zeroToOne, roughIndices, quadIndices, minecraft);
+        if (PerfLog.ON) {
+            PerfLog.renderPhase(7, depthStart);
+        }
         if (PerfLog.ON) {
             PerfLog.gpuMark(encoder, true);
         }
@@ -1220,6 +1296,9 @@ public final class LodRenderer {
         LodManager.ChunkMask chunkMask = this.manager.chunkMask();
         int[] mask = chunkMask.values();
         int half = chunkMask.half();
+        if (PerfLog.ON && mask.length == 0) {
+            PerfLog.flicker("the chunk mask is empty this frame: the rough terrain is drawn over every chunk");
+        }
         int size = (MASK_HEADER + Math.max(mask.length, 1)) * 4;
         try {
             if (this.chunkMaskBuffer == null || this.chunkMaskBuffer.size() < size) {
@@ -1253,6 +1332,9 @@ public final class LodRenderer {
             return buffer;
         } catch (RuntimeException e) {
             LOGGER.error("FarPlane could not write the chunk mask", e);
+            if (PerfLog.ON) {
+                PerfLog.flicker("the chunk mask could not be written this frame");
+            }
             Arrays.fill(this.chunkMaskVersions, -1);
             return null;
         }
@@ -1537,7 +1619,19 @@ public final class LodRenderer {
         return this.atlasSampler;
     }
 
+    /** The walls along vanilla's edge, made again when the chunk mask changed; whether there are any. */
+    private boolean updateVanillaWall(net.minecraft.client.multiplayer.@Nullable ClientLevel level) {
+        if (level == null) {
+            return false;
+        }
+        this.vanillaWall.update(level, this.manager.chunkMask());
+        return this.vanillaWall.quads() > 0 && this.vanillaWall.buffer() != null;
+    }
+
+    private final VanillaWall vanillaWall = new VanillaWall();
+
     public void close() {
+        this.vanillaWall.close();
         this.lodFog.close();
         if (this.atlasSampler != null) {
             this.atlasSampler.close();

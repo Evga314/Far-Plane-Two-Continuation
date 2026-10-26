@@ -55,6 +55,32 @@ int leftToOthers(vec3 position) {
     }
     return (value & 3) != 0 && abs(position.y) < intBitsToFloat(texelFetch(ChunkMask, 3).r) ? value & 3 : 0;
 }
+
+#ifdef UNDER_DETAIL
+// Whether vanilla draws the chunk of a point, as far up and down as it draws sections: its water there has no gap for the patch to
+// show through. Along the edge of what vanilla draws, the patch is in the chunks beyond it.
+bool vanillaChunk(vec3 position) {
+    int chunks = texelFetch(ChunkMask, 2).r;
+    if (chunks < 0) {
+        return false;
+    }
+    vec2 camera = vec2(intBitsToFloat(texelFetch(ChunkMask, 0).r), intBitsToFloat(texelFetch(ChunkMask, 1).r));
+    ivec2 chunk = ivec2(floor((position.xz + camera) / 16.0)) + chunks;
+    int side = 2 * chunks + 1;
+    if (chunk.x < 0 || chunk.y < 0 || chunk.x >= side || chunk.y >= side) {
+        return false;
+    }
+    int value = texelFetch(ChunkMask, 5 + chunk.x + chunk.y * side).r;
+    return (value & 3) != 0 && abs(position.y) < intBitsToFloat(texelFetch(ChunkMask, 3).r);
+}
+
+// The same, half a block in from every side: right on the border of what vanilla draws single pixels were covered by neither vanilla's
+// water nor the wall along its edge (see VanillaWall), and the patch, pushed far back, fills them.
+bool insideVanilla(vec3 position) {
+    return vanillaChunk(position + vec3(0.5, 0.0, 0.5)) && vanillaChunk(position + vec3(-0.5, 0.0, 0.5))
+        && vanillaChunk(position + vec3(0.5, 0.0, -0.5)) && vanillaChunk(position + vec3(-0.5, 0.0, -0.5));
+}
+#endif
 #endif
 
 #if defined(TEXTURED) && defined(DEPTH_ONLY)
@@ -193,6 +219,21 @@ void main() {
     fragColor = vec4(wallColor(relativePosition.y + TextureMat[0][1]), 1.0);
     return;
 #endif
+#ifdef VANILLA_WALL
+    // Vanilla draws no sections farther above or below the camera than TextureMat[0][0]: there the rough terrain draws its water over
+    // vanilla's chunks too (see leftToOthers), and the walls, drawn over it, stood out of it seen from high above.
+    if (abs(relativePosition.y) >= TextureMat[0][0]) {
+        discard;
+    }
+    // The walls of water along vanilla's edge (see VanillaWall) carry their color in the vertices and
+    // take the fog of the LOD terrain like everything else.
+    vec4 wallFog = TextureMat[3][3] > 0.5 ? FogColor : vec4(TextureMat[3].xyz, FogColor.a);
+    float wallSpherical = fog_spherical_distance(relativePosition);
+    float wallRender = FogCloudsEnd > 0.5 ? wallSpherical : fog_cylindrical_distance(relativePosition);
+    fragColor = apply_fog(vec4(vertexColor.rgb, 1.0), wallSpherical, wallRender, FogEnvironmentalStart, FogEnvironmentalEnd, FogRenderDistanceStart,
+        FogRenderDistanceEnd, wallFog);
+    return;
+#endif
     // Rough tiles mark the void between floating islands with zero alpha; the island edge lies half way to the void sample.
     if (vertexColor.a < 0.5) {
         DROP;
@@ -268,8 +309,9 @@ void main() {
     // shader), so it neither stands out between their blocks nor leaves a hole where it is cut out along the edge of what they draw.
     int owner = leftToOthers(relativePosition);
 #ifdef UNDER_DETAIL
-    // Only the water within the detailed tiles and vanilla's chunks, drawn under them without depth, see LodRenderer.
-    if (wet < 0.5 || horizontal >= TextureMat[2][1]) {
+    // Only the water within the detailed tiles and vanilla's chunks, drawn under them without depth, see LodRenderer. Not inside what
+    // vanilla draws: there it has no gap to fill, and on some phones it was now and then drawn over vanilla's seabed for a frame.
+    if (wet < 0.5 || horizontal >= TextureMat[2][1] || insideVanilla(relativePosition)) {
         DROP;
     }
 #else
@@ -286,6 +328,11 @@ void main() {
 #endif
     // The water there is drawn by the pass under the detailed tiles.
     if (wet >= 0.5 && horizontal < TextureMat[2][1]) {
+        DROP;
+    }
+    // With the walls along vanilla's edge (TextureMat[1][0], see VanillaWall) the view through vanilla's water ends at them, and the
+    // rough water under vanilla's chunks, a little under vanilla's surface, only stood in front of them as lighter patches.
+    if (TextureMat[1][0] > 0.5 && (owner == 1 || owner == 2) && wet >= 0.5) {
         DROP;
     }
 #endif

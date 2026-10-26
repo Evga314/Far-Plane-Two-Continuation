@@ -2,7 +2,6 @@ package com.Evga314.farplanetwocontinuation.client.lod;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
-import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import net.minecraft.util.Mth;
 import org.jspecify.annotations.Nullable;
@@ -10,7 +9,8 @@ import org.jspecify.annotations.Nullable;
 /** A tile uploaded to the GPU, either a rough terrain tile or a detailed one built from real blocks. */
 final class TileMesh implements AutoCloseable {
     final TilePos pos;
-    final GpuBuffer vertices;
+    /** The tile's vertices, a part of one of its layer's blocks of GPU memory. */
+    final VertexArena.Part vertices;
     final float minY;
     final float maxY;
     /** Lowest terrain point, without the skirt. */
@@ -83,7 +83,7 @@ final class TileMesh implements AutoCloseable {
     /** Distance to the camera in the current frame, used to draw near tiles first. */
     double sortDistance;
 
-    TileMesh(TilePos pos, GpuBuffer vertices, GeneralMeshFactory.Built built, long receivedAt) {
+    TileMesh(TilePos pos, VertexArena.Part vertices, GeneralMeshFactory.Built built, long receivedAt) {
         this.pos = pos;
         this.vertices = vertices;
         this.minY = built.minY();
@@ -162,18 +162,17 @@ final class TileMesh implements AutoCloseable {
 
     /** The whole vertex buffer as a slice, made once instead of for every pass of every frame. Render thread only. */
     GpuBufferSlice vertexSlice() {
-        if (this.vertexSlice == null) {
-            this.vertexSlice = this.vertices.slice();
-        }
-        return this.vertexSlice;
+        return this.vertices.slice();
     }
-
-    private @Nullable GpuBufferSlice vertexSlice;
 
     @Override
     public void close() {
         if (!this.vertices.isClosed()) {
+            long start = PerfLog.ON ? System.nanoTime() : 0L;
             this.vertices.close();
+            if (PerfLog.ON) {
+                PerfLog.bufferFreed(System.nanoTime() - start);
+            }
         }
     }
 }

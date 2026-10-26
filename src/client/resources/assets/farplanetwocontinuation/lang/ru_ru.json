@@ -121,6 +121,8 @@
   "farplanetwocontinuation.options.detailed.depth": "Глубина сканирования",
   "farplanetwocontinuation.options.detailed.depth.tooltip": "Насколько глубоко от поверхности (в блоках) сервер сканирует местность. Большие значения могут нагружать процессор",
   "farplanetwocontinuation.options.detailed.depth.blocks": "%s блоков",
+  "farplanetwocontinuation.options.detailed.ore_veins": "Генерация рудных жил",
+  "farplanetwocontinuation.options.detailed.ore_veins.tooltip": "Возвращает генерацию рудных жил в виртуальных чанках. Немного нагружает процессор и создает больше 'мусора' в памяти",
   "farplanetwocontinuation.toggle.on": "Ландшафт LOD: вкл",
   "farplanetwocontinuation.toggle.off": "Ландшафт LOD: выкл",
   "farplanetwocontinuation.reload.started": "Очистка кэша LOD этого измерения...",

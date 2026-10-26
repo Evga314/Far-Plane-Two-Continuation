@@ -14,6 +14,7 @@ import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.densityfunction.DensityBuffer;
 import net.minecraft.world.level.levelgen.densityfunction.DensitySampler;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
+import net.minecraft.world.level.levelgen.densityfunction.DensityBufferPool;
 import net.minecraft.world.level.levelgen.densityfunction.SamplerContext;
 import net.minecraft.world.level.levelgen.synth.SimplexNoise;
 import org.jspecify.annotations.Nullable;
@@ -260,7 +261,8 @@ final class EndTileGenerator {
         private final DensitySampler sampler;
         /** Vanilla's 3D noise of the End, null when a data pack removed it; then the island shape alone decides. */
         private final @Nullable DensitySampler noise;
-        private final SamplerContext context = SamplerContext.builder().enableCaches().build();
+        /** With a pool of its own, so its buffers are used again instead of made anew for every value sampled. */
+        private final SamplerContext context = SamplerContext.builder().enableCaches().useBufferArena(new DensityBufferPool(20)).build();
         private final int minY;
         private final int maxY;
         private final int size;

@@ -121,6 +121,8 @@
   "farplanetwocontinuation.options.detailed.depth": "Scan Depth",
   "farplanetwocontinuation.options.detailed.depth.tooltip": "How deep from the surface (in blocks) the server scans the terrain. Large values can load the CPU",
   "farplanetwocontinuation.options.detailed.depth.blocks": "%s blocks",
+  "farplanetwocontinuation.options.detailed.ore_veins": "Ore Vein Generation",
+  "farplanetwocontinuation.options.detailed.ore_veins.tooltip": "Brings back ore vein generation in virtual chunks. Loads the CPU a little and makes more 'garbage' in memory",
   "farplanetwocontinuation.toggle.on": "LOD terrain: on",
   "farplanetwocontinuation.toggle.off": "LOD terrain: off",
   "farplanetwocontinuation.reload.started": "Clearing the LOD cache of this dimension...",

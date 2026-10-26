@@ -6,7 +6,7 @@ public final class FarPlaneConstants {
         || System.getProperty("os.version", "").toLowerCase(java.util.Locale.ROOT).contains("android");
 
     public static final String MOD_ID = "farplanetwocontinuation";
-    public static final int PROTOCOL_VERSION = 17;
+    public static final int PROTOCOL_VERSION = 18;
 
     /** Cells along one tile edge. A tile holds TILE_CELLS + 1 samples per edge so neighbours share border samples. */
     public static final int TILE_CELLS = 32;

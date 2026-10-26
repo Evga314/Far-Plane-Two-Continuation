@@ -216,6 +216,11 @@ public class ClientConfig {
          * owner of a singleplayer world decides it, on a server its config file does.
          */
         public int scanDepth = 0;
+        /**
+         * Ore veins in the chunks generated in memory (the overworld only). Off by default: those chunks are made faster and with
+         * much less garbage. Decided like {@link #scanDepth}.
+         */
+        public boolean oreVeins = false;
 
         public BlockDetail blocks() {
             return BlockDetail.of(this.blockDetail);
@@ -229,7 +234,7 @@ public class ClientConfig {
 
         String signature() {
             return this.enabled + "|" + this.radiusChunks + "|" + this.gpuMegabytes + "|" + this.generate
-                + "|" + this.blockDetail + "|" + this.scanDepth;
+                + "|" + this.blockDetail + "|" + this.scanDepth + "|" + this.oreVeins;
         }
     }
 

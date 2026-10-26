@@ -47,7 +47,8 @@ public final class ChunkSummary {
      * How a column is scanned: how many blocks down from its top, and whether the void is under the scanned part (the End), so it
      * goes on as air instead of as the last block. Summaries made with another scan are never mixed in.
      */
-    record Scan(int depth, boolean voidBelow) {
+    /** {@code oreVeins}: chunks generated in memory have the world's ore veins, see VirtualTerrain#surfaceRule. */
+    record Scan(int depth, boolean voidBelow, boolean oreVeins) {
     }
 
     private final Scan scan;

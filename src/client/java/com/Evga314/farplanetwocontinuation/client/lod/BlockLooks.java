@@ -331,23 +331,7 @@ final class BlockLooks {
      * tints only change with the biome, apart from the patches of swamp grass, which are much bigger than that.
      */
     private static int tintAt(BlockTintSource tint, BlockState state, @Nullable Holder<Biome> biome, int x, int y, int z) {
-        Map<TintKey, Integer> cache = TINTS.get();
-        TintKey key = new TintKey(tint, state, biome, x >> TINT_CELL, z >> TINT_CELL);
-        Integer cached = cache.get(key);
-        if (cached != null) {
-            return cached;
-        }
-        int color;
-        try {
-            color = tint.colorInWorld(state, new TintGetter(biome), new BlockPos(x, y, z));
-        } catch (RuntimeException e) {
-            color = -1;
-        }
-        if (cache.size() >= MAX_TINTS) {
-            cache.clear();
-        }
-        cache.put(key, color);
-        return color;
+        return TINTS.get().get(tint, state, biome, x, y, z);
     }
 
     /**
@@ -387,14 +371,56 @@ final class BlockLooks {
 
     /** Squares of 2^TINT_CELL blocks share a tint. */
     private static final int TINT_CELL = 2;
-    private static final int MAX_TINTS = 8192;
-    private static final ThreadLocal<Map<TintKey, Integer>> TINTS = ThreadLocal.withInitial(java.util.HashMap::new);
+    private static final ThreadLocal<TintCache> TINTS = ThreadLocal.withInitial(TintCache::new);
 
-    private record TintKey(BlockTintSource tint, BlockState state, @Nullable Holder<Biome> biome, int x, int z) {
+    /**
+     * Tints worked out by one mesh builder thread, in a table where every key has one slot and a newer key takes the slot of an older
+     * one. Looking one up makes no garbage: the mesh builders ask for a tint for nearly every face, and a key object and a boxed color
+     * each time made a good part of what they allocate.
+     */
+    private static final class TintCache {
+        private static final int SLOTS = 1 << 14;
+        private final BlockTintSource[] tints = new BlockTintSource[SLOTS];
+        private final BlockState[] states = new BlockState[SLOTS];
+        private final Object[] biomes = new Object[SLOTS];
+        private final int[] cellXs = new int[SLOTS];
+        private final int[] cellZs = new int[SLOTS];
+        private final int[] colors = new int[SLOTS];
+        private final TintGetter getter = new TintGetter();
+        private final BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+
+        int get(BlockTintSource tint, BlockState state, @Nullable Holder<Biome> biome, int x, int y, int z) {
+            int cellX = x >> TINT_CELL;
+            int cellZ = z >> TINT_CELL;
+            int hash = System.identityHashCode(tint) * 31 + System.identityHashCode(state);
+            hash = hash * 31 + System.identityHashCode(biome);
+            hash = hash * 31 + cellX * 73856093 ^ cellZ * 19349663;
+            int slot = (hash ^ hash >>> 15) & (SLOTS - 1);
+            if (this.tints[slot] == tint && this.states[slot] == state && this.biomes[slot] == biome && this.cellXs[slot] == cellX
+                && this.cellZs[slot] == cellZ) {
+                return this.colors[slot];
+            }
+            int color;
+            try {
+                this.getter.biome = biome;
+                color = tint.colorInWorld(state, this.getter, this.pos.set(x, y, z));
+            } catch (RuntimeException e) {
+                color = -1;
+            }
+            this.tints[slot] = tint;
+            this.states[slot] = state;
+            this.biomes[slot] = biome;
+            this.cellXs[slot] = cellX;
+            this.cellZs[slot] = cellZ;
+            this.colors[slot] = color;
+            return color;
+        }
     }
 
-    /** Just enough of a world for vanilla's tint sources: the biome colors of one place, nothing else. */
-    private record TintGetter(@Nullable Holder<Biome> biome) implements BlockAndTintGetter {
+    /** Just enough of a world for vanilla's tint sources: the biome colors of one place, nothing else. Reused, see TintCache. */
+    private static final class TintGetter implements BlockAndTintGetter {
+        @Nullable Holder<Biome> biome;
+
         @Override
         public CardinalLighting cardinalLighting() {
             return CardinalLighting.DEFAULT;

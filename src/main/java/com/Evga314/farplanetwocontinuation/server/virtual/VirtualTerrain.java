@@ -50,6 +50,9 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
+import net.minecraft.world.level.levelgen.material.rule.OreVeinRule;
+import net.minecraft.world.level.levelgen.material.rule.SequenceRule;
 import net.minecraft.world.level.levelgen.NoiseSettings;
 import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.RandomSupport;
@@ -176,6 +179,14 @@ public final class VirtualTerrain {
      * without them the sea simply fills everything below sea level, which is what the surface looks like anyway.
      */
     private final NoiseGeneratorSettings surfaceSettings;
+    /**
+     * The world's material rule without ore veins, unless the player wants them. Every chunk they are in works out two noises for each
+     * block of it, in buffers made for that chunk alone: most of the garbage virtual chunks make, and a part of their time. The veins
+     * lie deep under the ground and only show now and then in the walls of caves and cliffs.
+     */
+    private final MaterialRule surfaceRule;
+    /** Whether the terrain in {@link #terrainCache} was made with ore veins. */
+    private volatile boolean cachedVeins;
     private final Aquifer.FluidPicker fluidPicker;
     private final ChunkStep terrainStep = ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.TERRAIN);
     private final ChunkStep featureStep = ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FEATURES);
@@ -206,12 +217,38 @@ public final class VirtualTerrain {
             s.noiseSettings(), s.defaultBlock(), s.defaultFluid(), s.noiseRouter(), s.materialRule(), s.spawnTarget(), s.seaLevel(),
             s.disableMobGeneration(), Optional.empty(), s.useLegacyRandomSource(), s.debugFunctions()
         );
+        MaterialRule rule = withoutOreVeins(s.materialRule().value());
+        this.surfaceRule = rule != null ? rule : s.materialRule().value();
         this.fluidPicker = ((NoiseBasedChunkGeneratorAccess) (Object) generator).farplane$globalFluidPicker().get();
         this.structureState = level.getChunkSource().getGeneratorState();
         this.templates = level.getServer().getStructureTemplateManager();
         this.structures = level.getServer().getWorldGenSettings().options().generateStructures();
         Registry<Structure> registry = level.registryAccess().lookupOrThrow(Registries.STRUCTURE);
         registry.stream().forEach(structure -> this.structuresByStep.computeIfAbsent(structure.step().ordinal(), step -> new ArrayList<>()).add(structure));
+    }
+
+    /** A material rule with its ore veins left out, the rule itself when it has none, null when nothing else is left. */
+    private static @Nullable MaterialRule withoutOreVeins(MaterialRule rule) {
+        if (rule instanceof OreVeinRule) {
+            return null;
+        }
+        if (rule instanceof MaterialRule.HolderHolder(var holder)) {
+            MaterialRule inner = withoutOreVeins(holder.value());
+            return inner == holder.value() ? rule : inner;
+        }
+        if (rule instanceof SequenceRule(var sequence)) {
+            List<MaterialRule> kept = new ArrayList<>(sequence.size());
+            boolean changed = false;
+            for (MaterialRule part : sequence) {
+                MaterialRule inner = withoutOreVeins(part);
+                changed |= inner != part;
+                if (inner != null) {
+                    kept.add(inner);
+                }
+            }
+            return !changed ? rule : kept.isEmpty() ? null : new SequenceRule(List.copyOf(kept));
+        }
+        return rule;
     }
 
     /** True while surface rules run for a virtual chunk, see {@code MaterialSystemMixin}. */
@@ -228,7 +265,16 @@ public final class VirtualTerrain {
      * Generates a rectangle of chunks and returns them row by row ({@code chunks[x + z * width]}), finished as far as they can be
      * seen from above. Chunks keep only their blocks and biomes.
      */
-    public ProtoChunk[] generate(int minX, int minZ, int width, int depth) {
+    /** {@code oreVeins}: with the world's ore veins, see {@link #surfaceRule}. */
+    public ProtoChunk[] generate(int minX, int minZ, int width, int depth, boolean oreVeins) {
+        // Terrain kept from regions made with or without veins is not mixed with the other kind.
+        if (oreVeins != this.cachedVeins) {
+            synchronized (this.terrainCache) {
+                this.terrainCache.clear();
+            }
+            this.cachedVeins = oreVeins;
+        }
+        MaterialRule rule = oreVeins ? this.settings.materialRule().value() : this.surfaceRule;
         int sizeX = width + MARGIN * 2;
         int sizeZ = depth + MARGIN * 2;
         int originX = minX - MARGIN;
@@ -266,7 +312,7 @@ public final class VirtualTerrain {
             WorkThrottle.yieldToFrames();
             this.addReferences(chunk);
             if (!chunk.getPersistedStatus().isOrAfter(ChunkStatus.TERRAIN)) {
-                this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1]);
+                this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1], rule);
                 this.storeTerrain(chunk);
                 if (PERF) {
                     PERF_TERRAIN_BUILT.incrementAndGet();
@@ -360,14 +406,19 @@ public final class VirtualTerrain {
      * generator's own 2D surface estimate is sampled every 8 blocks; it ignores overhangs and jagged peaks, which the margins cover.
      */
     private int[] surfaceBands(int originX, int originZ, int sizeX, int sizeZ) {
-        SamplerContext context = SamplerContext.builder().enableCaches().build();
+        DensityBufferPool pool = this.randomState.acquireDensityBufferPool();
         int grid = sizeX * 2 + 1;
         int[] estimates = new int[grid * (sizeZ * 2 + 1)];
-        for (int gz = 0; gz <= sizeZ * 2; gz++) {
-            for (int gx = 0; gx < grid; gx++) {
-                float value = this.surfaceEstimate.sampleValue(context, originX * 16 + gx * 8, 0, originZ * 16 + gz * 8);
-                estimates[gx + gz * grid] = Float.isFinite(value) ? Mth.floor(value) : this.settings.seaLevel();
+        try {
+            SamplerContext context = SamplerContext.builder().enableCaches().useBufferArena(pool).build();
+            for (int gz = 0; gz <= sizeZ * 2; gz++) {
+                for (int gx = 0; gx < grid; gx++) {
+                    float value = this.surfaceEstimate.sampleValue(context, originX * 16 + gx * 8, 0, originZ * 16 + gz * 8);
+                    estimates[gx + gz * grid] = Float.isFinite(value) ? Mth.floor(value) : this.settings.seaLevel();
+                }
             }
+        } finally {
+            this.randomState.releaseDensityBufferPool(pool);
         }
         int worldMin = this.level.getMinY();
         int worldTop = this.level.getMaxY() + 1;
@@ -506,7 +557,7 @@ public final class VirtualTerrain {
         }
     }
 
-    private void buildTerrain(Area chunks, ProtoChunk chunk, int bottom, int top) {
+    private void buildTerrain(Area chunks, ProtoChunk chunk, int bottom, int top, MaterialRule rule) {
         VirtualRegion region = chunks.region(this.terrainStep, chunk);
         StructureManager structureManager = this.level.structureManager().forWorldGenRegion(region);
         NoiseSettings full = this.settings.noiseSettings();
@@ -535,7 +586,7 @@ public final class VirtualTerrain {
                 BUILDING_SURFACE.set(true);
                 try {
                     access.farplane$buildSurface(
-                        chunk, noiseChunk, this.randomState, region.getBiomeManager(), possibleBiomes(region, pos), this.settings.materialRule().value()
+                        chunk, noiseChunk, this.randomState, region.getBiomeManager(), possibleBiomes(region, pos), rule
                     );
                 } finally {
                     BUILDING_SURFACE.set(false);

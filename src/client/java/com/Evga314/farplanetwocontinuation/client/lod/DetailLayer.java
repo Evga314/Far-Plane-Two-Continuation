@@ -129,7 +129,8 @@ final class DetailLayer extends LodLayer {
     @Override
     void sendRequests(int[] requests) {
         ClientPlayNetworking.send(new FarPlanePayloads.DetailRequest(
-            requests, this.config.detail().generate, Math.round(WorkThrottle.urgency() * 100.0F), this.config.detail().scanDepth
+            requests, this.config.detail().generate, Math.round(WorkThrottle.urgency() * 100.0F), this.config.detail().scanDepth,
+            this.config.detail().oreVeins
         ));
     }
 

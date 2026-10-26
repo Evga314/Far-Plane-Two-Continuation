@@ -355,6 +355,7 @@ public final class LodManager {
     }
     public void onHello(FarPlanePayloads.Hello hello) {
         this.hello = hello;
+        // Makes the GPU memory too, while the world is still loading, see reserveMemory.
         this.resetTiles();
         if (hello.protocol() != FarPlaneConstants.PROTOCOL_VERSION) {
             LOGGER.warn("Server uses FarPlane protocol {}, this client uses {}. LOD terrain is disabled.", hello.protocol(), FarPlaneConstants.PROTOCOL_VERSION);
@@ -388,16 +389,37 @@ public final class LodManager {
         }
     }
 
+    /**
+     * GPU memory made while the world loads, where the stall of making it is not seen: three quarters of the limit of the detailed
+     * tiles and what the rough ones usually take. The rest is made when needed, so a limit set higher than the GPU has does not stop
+     * the world from loading. Done whenever all tiles were dropped, so a lower limit gives memory back at once.
+     */
+    private void reserveMemory() {
+        if (this.hello == null) {
+            return;
+        }
+        ClientConfig.DetailSettings detail = this.config.detail();
+        this.detail.reserveMemory(detail.enabled ? detail.gpuMegabytes * 3 / 4 : 0);
+        this.rough.reserveMemory(ROUGH_RESERVED_MB);
+    }
+
+    /** GPU memory of the rough tiles made while the world loads; they took 20 to 60 MB in the logs. */
+    private static final int ROUGH_RESERVED_MB = 64;
+
     public void onDisconnect() {
         this.waitingForClearUntil = 0L;
         this.hello = null;
         this.dimension = null;
         this.resetTiles();
+        // Leaving the world: its GPU memory is given back.
+        this.rough.closeMemory();
+        this.detail.closeMemory();
     }
 
     public void resetTiles() {
         this.rough.reset();
         this.detail.reset();
+        this.reserveMemory();
         this.drawList = List.of();
         this.cullResult = null;
     }
@@ -525,8 +547,12 @@ public final class LodManager {
             this.config.dimension = DimensionKind.of(level);
             this.rough.setFloating(this.config.dimension == DimensionKind.END);
             this.view.extendCloudFarPlane = this.config.extendCloudFarPlane;
-            // A shader pack replaces vanilla's main pass with its own: the LOD terrain keeps its pass of its own then.
-            LodRenderer.mainPassPrototype = this.config.newRenderer && !IrisCompat.shadersActive();
+            // A shader pack replaces vanilla's main pass with its own: the LOD terrain keeps its pass of its own then. So it does where
+            // depth runs from -1 to 1 (OpenGL without clip control, as on phones through LTW): the far plane at infinity in vanilla's
+            // depth buffer then leaves too little precision, and the LOD terrain and vanilla's blocks fought over it as the camera
+            // turned.
+            LodRenderer.mainPassPrototype = this.config.newRenderer && !IrisCompat.shadersActive() && !DebugToggles.noMainPass
+                && RenderSystem.getDevice().getDeviceInfo().isZZeroToOne();
         }
         if (!this.isActive() || level == null) {
             if (this.rough.hasWork() || this.detail.hasWork()) {
@@ -577,12 +603,17 @@ public final class LodManager {
         this.rough.select(this.view, this.tick, now);
         phaseStart = this.tickPhase(2, phaseStart);
         if (this.tick % FULLY_DRAWN_INTERVAL == 0) {
+            double lastFullyDrawn = this.fullyDrawnRadius;
             this.fullyDrawnRadius = this.view.fullyDrawnRadius(this.minecraft.options.getEffectiveRenderDistance());
             int half = this.minecraft.options.getEffectiveRenderDistance() + 1;
+            if (PerfLog.ON) {
+                this.watchMask(lastFullyDrawn);
+            }
             this.drawnChunks = this.view.chunkMask(half, this.drawnChunks);
             this.drawnHalf = half;
             this.drawnX = Mth.floor(this.view.camX) >> 4;
             this.drawnZ = Mth.floor(this.view.camZ) >> 4;
+            this.findMaskEdge();
             if (PerfLog.ON && this.tick % 100 == 0) {
                 int drawn = 0;
                 for (byte value : this.drawnChunks) {
@@ -597,10 +628,9 @@ public final class LodManager {
                     this.view.fullyDrawnReason);
             }
         }
+        // The rough terrain gives way to vanilla's chunks by the chunk mask alone, chunk by chunk as they come: cut away within the
+        // radius vanilla draws fully as well, its edge jumped with that radius whenever Sodium built a section near the camera.
         this.updateChunkMask();
-        for (TileMesh mesh : this.rough.drawList()) {
-            mesh.discardRadius = Math.max(mesh.discardRadius, (float) this.fullyDrawnRadius);
-        }
         phaseStart = this.tickPhase(3, phaseStart);
         this.cullHidden(ringRadius);
         phaseStart = this.tickPhase(4, phaseStart);
@@ -631,6 +661,67 @@ public final class LodManager {
         this.rough.evict();
         this.tickPhase(6, phaseStart);
     }
+
+    // Debug build: the chunk mask of the last check, to see chunks inside vanilla's area drop out of it for a moment.
+    private byte[] watchedMask = new byte[0];
+
+    /**
+     * Debug build, before the chunk mask is worked out again: logs when chunks well inside what vanilla draws stop counting as drawn by
+     * vanilla in the new one, or when the radius within which vanilla draws everything shrinks a lot. Either lets the rough terrain
+     * through over vanilla's chunks, which looks like a flash of it over the whole sea around.
+     */
+    private void watchMask(double lastFullyDrawn) {
+        byte[] before = this.drawnChunks;
+        int beforeHalf = this.drawnHalf;
+        int beforeX = this.drawnX;
+        int beforeZ = this.drawnZ;
+        // The new mask, worked out here once more only for this check; the tick goes on with its own below.
+        int half = this.minecraft.options.getEffectiveRenderDistance() + 1;
+        this.watchedMask = this.view.chunkMask(half, this.watchedMask);
+        int side = 2 * half + 1;
+        int centerX = Mth.floor(this.view.camX) >> 4;
+        int centerZ = Mth.floor(this.view.camZ) >> 4;
+        double inner = (this.minecraft.options.getEffectiveRenderDistance() - 3) * 16.0;
+        int lost = 0;
+        int drawn = 0;
+        int beforeSide = 2 * beforeHalf + 1;
+        for (int z = 0; z < side; z++) {
+            for (int x = 0; x < side; x++) {
+                if (this.watchedMask[x + z * side] != 0) {
+                    drawn++;
+                    continue;
+                }
+                int chunkX = centerX + x - half;
+                int chunkZ = centerZ + z - half;
+                double dx = chunkX * 16.0 + 8.0 - this.view.camX;
+                double dz = chunkZ * 16.0 + 8.0 - this.view.camZ;
+                if (dx * dx + dz * dz > inner * inner) {
+                    continue;
+                }
+                int bx = chunkX - beforeX + beforeHalf;
+                int bz = chunkZ - beforeZ + beforeHalf;
+                if (bx >= 0 && bz >= 0 && bx < beforeSide && bz < beforeSide && bx + bz * beforeSide < before.length && before[bx + bz * beforeSide] != 0) {
+                    lost++;
+                }
+            }
+        }
+        if (lost >= 4 || this.fullyDrawnRadius < lastFullyDrawn - 48.0) {
+            PerfLog.flicker(String.format(java.util.Locale.ROOT,
+                "tick %d: %d chunks inside vanilla's area no longer count as drawn (%d drawn now), fully drawn radius %.0f -> %.0f (%s), camera y %.1f",
+                this.tick, lost, drawn, lastFullyDrawn, this.fullyDrawnRadius, this.view.fullyDrawnReason, this.view.camY));
+        }
+    }
+
+    /** Debug build, every frame: logs when what Sodium draws drops sharply from one frame to the next. */
+    void watchSodiumFrame() {
+        int sections = this.view.sodiumFrameSections();
+        if (sections >= 0 && this.lastSodiumSections > 50 && sections < this.lastSodiumSections * 0.7) {
+            PerfLog.flicker("Sodium draws " + sections + " sections this frame, " + this.lastSodiumSections + " the frame before");
+        }
+        this.lastSodiumSections = sections;
+    }
+
+    private int lastSodiumSections = -1;
 
     /** Adds the time since {@code start} to a part of the tick in the debug build, see PerfLog.TICK_PHASES; returns the time now. */
     private long tickPhase(int phase, long start) {
@@ -686,7 +777,11 @@ public final class LodManager {
             return;
         }
         if (this.cullJob == null) {
-            Horizon.Job job = Horizon.snapshot(this.view, detailTiles, this.rough.drawList(), ringRadius, HIDDEN_MARGIN + 4.0 * Math.min(moved, 64.0));
+            // Rough terrain within vanilla's distance lies under vanilla's blocks (see the vertex shader) and hides nothing behind it,
+            // with or without the detailed tiles: counted as hiding, its guessed shape hid and showed the tiles right beyond vanilla's
+            // edge as the camera moved.
+            double cut = Math.max(ringRadius, this.view.vanillaRadius + 16.0);
+            Horizon.Job job = Horizon.snapshot(this.view, detailTiles, this.rough.drawList(), cut, HIDDEN_MARGIN + 4.0 * Math.min(moved, 64.0));
             try {
                 this.cullJob = CompletableFuture.supplyAsync(job::run, this.cullExecutor);
             } catch (RejectedExecutionException e) {
@@ -721,18 +816,85 @@ public final class LodManager {
     private final java.util.ArrayList<TileMesh> changedEdgeMeshes = new java.util.ArrayList<>();
 
     /**
+     * The chunks of the mask along the edge of what vanilla draws, as they were last worked out (see {@link #frameMask}): per chunk its
+     * index in {@link #drawnChunks}, how many surface sections it has and the sections.
+     */
+    private final it.unimi.dsi.fastutil.ints.IntArrayList maskEdge = new it.unimi.dsi.fastutil.ints.IntArrayList();
+    private int[] sectionScratch = new int[8];
+
+    /** Finds the chunks of the mask along the edge of what vanilla draws, with the sections of their surfaces, see frameMask. */
+    private void findMaskEdge() {
+        this.maskEdge.clear();
+        int half = this.drawnHalf;
+        int side = 2 * half + 1;
+        int[] sections = this.sectionScratch;
+        for (int i = 0; i < this.drawnChunks.length; i++) {
+            int chunkX = this.drawnX + i % side - half;
+            int chunkZ = this.drawnZ + i / side - half;
+            if (!this.alongVanillaEdge(chunkX, chunkZ)) {
+                continue;
+            }
+            int count = this.view.surfaceSections(chunkX, chunkZ, sections, 0);
+            if (count == 0) {
+                continue;
+            }
+            this.maskEdge.add(i);
+            this.maskEdge.add(count);
+            for (int k = 0; k < count; k++) {
+                this.maskEdge.add(sections[k]);
+            }
+        }
+    }
+
+    /**
+     * Once a frame: the chunks along the edge of what vanilla draws are asked again by what Sodium draws in this very frame (see
+     * LodView#frameColumn), and the rough terrain gives way to a chunk, or takes it back, in the same frame vanilla starts or stops
+     * drawing it, not up to a few ticks later. On phones Sodium culls on a thread of its own and draws a section a frame or more
+     * after it is built; worked out by ticks, the rough terrain was cut away over nothing there for a moment, or drawn over vanilla.
+     */
+    private void frameMask() {
+        byte[] drawn = this.drawnChunks;
+        int half = this.drawnHalf;
+        int side = 2 * half + 1;
+        int[] edge = this.maskEdge.elements();
+        int changed = 0;
+        for (int at = 0; at < this.maskEdge.size(); at += 2 + edge[at + 1]) {
+            int index = edge[at];
+            if (index >= drawn.length) {
+                continue;
+            }
+            int state = this.view.frameColumn(this.drawnX + index % side - half, this.drawnZ + index / side - half, edge, at + 2, edge[at + 1]);
+            byte now = state > 0 ? (byte) 1 : state < 0 ? (byte) 0 : drawn[index];
+            if (now != drawn[index]) {
+                drawn[index] = now;
+                changed++;
+            }
+        }
+        if (changed > 0) {
+            // Debug build: chunks along the edge given to vanilla or taken back within a frame, to tell such changes from others.
+            if (PerfLog.ON) {
+                PerfLog.flicker("tick " + this.tick + ": " + changed + " chunks along vanilla's edge changed hands");
+            }
+            this.updateChunkMask();
+        }
+    }
+
+    /**
      * Once a frame, right before the LOD terrain is drawn, after Sodium (or vanilla) has taken in the sections it built for this frame:
      * the chunks along the edge of what vanilla draws are asked again, and the tiles where vanilla started or stopped drawing one leave
      * it out or take it back in this very frame. Worked out only every tick, both would draw a chunk at once for a moment, or neither.
      * Only the edge is asked: inside it what vanilla draws hardly changes.
      */
     public void frameCheck(double camX, double camY, double camZ) {
-        if (this.edgeMeshes.isEmpty()) {
+        if (this.edgeMeshes.isEmpty() && this.maskEdge.isEmpty()) {
             // Nothing along the edge: what Sodium drew is not needed, and an old frame of it must not be taken for this one.
             this.view.forgetFrame();
             return;
         }
         this.view.frameCamera(camX, camY, camZ);
+        if (!this.maskEdge.isEmpty() && !DebugToggles.noFrameMask) {
+            this.frameMask();
+        }
         List<TileMesh> changed = this.changedEdgeMeshes;
         changed.clear();
         int[] chunks = this.edgeChunks.elements();
@@ -925,6 +1087,8 @@ public final class LodManager {
     /** Queued meshes are dropped; running ones finish. Nothing is interrupted, see {@link WorkThrottle.Worker}. */
     public void close() {
         this.resetTiles();
+        this.rough.closeMemory();
+        this.detail.closeMemory();
         this.meshExecutor.getQueue().clear();
         this.meshExecutor.shutdown();
         this.cullExecutor.shutdown();

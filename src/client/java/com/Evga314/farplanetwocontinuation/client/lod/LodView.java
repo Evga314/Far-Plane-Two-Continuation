@@ -260,6 +260,64 @@ final class LodView {
      * The camera of the frame being drawn, for what is asked of vanilla's chunks within the frame (see LodManager.frameCheck): Sodium's
      * render distance is measured from it, and what Sodium draws in it is read (see SodiumFrame).
      */
+    /**
+     * The sections of a chunk's surface that vanilla has to draw for the chunk to count as drawn (see drawsColumn), written to
+     * {@code out} from {@code at}; returns how many, 0 when the chunk is not loaded. Asked a few times a second, for
+     * {@link #frameColumn} to check every frame.
+     */
+    int surfaceSections(int chunkX, int chunkZ, int[] out, int at) {
+        ClientLevel level = this.minecraft.level;
+        ChunkAccess chunk = level == null ? null : level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        if (!(chunk instanceof LevelChunk) || chunk instanceof EmptyLevelChunk) {
+            return 0;
+        }
+        int count = 0;
+        for (int i = 0; i < SURFACE_PROBES.length; i += 2) {
+            int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, SURFACE_PROBES[i], SURFACE_PROBES[i + 1]);
+            int sectionY = SectionPos.blockToSectionCoord(Mth.clamp(height, this.worldMinY, this.worldMaxY - 1));
+            boolean seen = false;
+            for (int k = at; k < at + count && !seen; k++) {
+                seen = out[k] == sectionY;
+            }
+            if (!seen) {
+                out[at + count++] = sectionY;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Whether vanilla draws a chunk in this very frame, by what Sodium draws in it (see SodiumFrame) and the sections of its surface
+     * (see {@link #surfaceSections}): 1 when Sodium draws every one of them within its reach, -1 when one of them is on screen and
+     * not drawn, 0 when it cannot be told (no frame known, or the sections not drawn are off screen, where nothing is seen anyway).
+     */
+    int frameColumn(int chunkX, int chunkZ, int[] sections, int at, int count) {
+        if (!this.frameKnown) {
+            return 0;
+        }
+        int cameraSection = SectionPos.blockToSectionCoord(Mth.floor(this.camY));
+        if (!this.sodiumInReach(chunkX, chunkZ, cameraSection)) {
+            return -1;
+        }
+        boolean unknown = false;
+        for (int i = at; i < at + count; i++) {
+            int sectionY = sections[i];
+            if (!this.sodiumInReach(chunkX, chunkZ, sectionY) || this.frameSections.contains(SectionPos.asLong(chunkX, sectionY, chunkZ))) {
+                continue;
+            }
+            if (sodiumSees(chunkX, sectionY, chunkZ)) {
+                return -1;
+            }
+            unknown = true;
+        }
+        return unknown ? 0 : 1;
+    }
+
+    /** Debug build: how many sections Sodium draws in this frame, -1 when that cannot be found out. */
+    int sodiumFrameSections() {
+        return this.sodium == null ? -1 : SodiumFrame.count(this.sodium);
+    }
+
     void frameCamera(double x, double y, double z) {
         this.camX = x;
         this.camY = y;
@@ -451,9 +509,9 @@ final class LodView {
         return y;
     }
 
-    /** Adds the section holding the block under a surface height to the list once. */
+    /** Adds the section holding a block to the list once; the client's heightmaps give the highest block itself. */
     private int addSection(int[] sections, int count, int height) {
-        int section = SectionPos.blockToSectionCoord(Mth.clamp(Math.max(height, this.worldMinY + 1) - 1, this.worldMinY, this.worldMaxY - 1));
+        int section = SectionPos.blockToSectionCoord(Mth.clamp(height, this.worldMinY, this.worldMaxY - 1));
         for (int i = 0; i < count; i++) {
             if (sections[i] == section) {
                 return count;
@@ -724,7 +782,7 @@ final class LodView {
         }
         for (int i = 0; i < SURFACE_PROBES.length; i += 2) {
             int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, SURFACE_PROBES[i], SURFACE_PROBES[i + 1]);
-            int sectionY = SectionPos.blockToSectionCoord(Mth.clamp(Math.max(height, this.worldMinY + 1) - 1, this.worldMinY, this.worldMaxY - 1));
+            int sectionY = SectionPos.blockToSectionCoord(Mth.clamp(height, this.worldMinY, this.worldMaxY - 1));
             boolean inReach = sodium != null
                 ? this.sodiumInReach(chunkX, chunkZ, sectionY)
                 : Math.abs(sectionY - cameraSection) <= viewArea.getViewDistance();

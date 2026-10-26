@@ -53,23 +53,51 @@ layout(location = 9) out float coastSide;
 // The chunks vanilla and the detailed tiles draw, see the fragment shader and LodManager.ChunkMask.
 uniform isamplerBuffer ChunkMask;
 
+// Points this close to the border of a chunk count as lying on it, see floorUnder.
+const float CHUNK_BORDER = 0.05;
+
+// The floor of one chunk of the mask (index from the north-west corner, see LodManager.ChunkMask) in world height from minY, or none
+// (a very large value). Vanilla's chunks count only as far above and below the camera as it draws sections, as in the fragment shader.
+float chunkFloor(ivec2 chunk, int side, float y) {
+    if (chunk.x < 0 || chunk.y < 0 || chunk.x >= side || chunk.y >= side) {
+        return 1.0e9;
+    }
+    int value = texelFetch(ChunkMask, 5 + chunk.x + chunk.y * side).r;
+    int floorCode = (value >> 16) & 0xFFFF;
+    bool drawn = (value & 256) != 0 || (value & 3) != 0 && abs(y) < intBitsToFloat(texelFetch(ChunkMask, 3).r);
+    return floorCode == 0 || !drawn ? 1.0e9 : float(floorCode);
+}
+
+// The lower of two floors, or none when either chunk has none.
+float bothFloors(float a, float b) {
+    return max(a, b) >= 1.0e9 ? 1.0e9 : min(a, b);
+}
+
 // A height around the camera under every block vanilla or the detailed tiles draw in the chunk of a point, or none (a very large
-// value). Vanilla's chunks count only as far above and below the camera as it draws sections, as in the fragment shader.
+// value). Rough vertices lie on the borders of chunks, and there the chunk of a point came out on one side or the other by rounding,
+// changing as the camera moved: the vertex jumped up and down, and the terrain along the edge flickered. A point on a border is lowered
+// only when every chunk around it is drawn, under the lowest of their floors.
 float floorUnder(vec3 position) {
     int chunks = texelFetch(ChunkMask, 2).r;
     if (chunks < 0) {
         return 1.0e9;
     }
     vec2 camera = vec2(intBitsToFloat(texelFetch(ChunkMask, 0).r), intBitsToFloat(texelFetch(ChunkMask, 1).r));
-    ivec2 chunk = ivec2(floor((position.xz + camera) / 16.0)) + chunks;
+    vec2 world = position.xz + camera;
+    ivec2 low = ivec2(floor((world - CHUNK_BORDER) / 16.0)) + chunks;
+    ivec2 high = ivec2(floor((world + CHUNK_BORDER) / 16.0)) + chunks;
     int side = 2 * chunks + 1;
-    if (chunk.x < 0 || chunk.y < 0 || chunk.x >= side || chunk.y >= side) {
-        return 1.0e9;
+    float floorHeight = chunkFloor(low, side, position.y);
+    if (high.x != low.x) {
+        floorHeight = bothFloors(floorHeight, chunkFloor(ivec2(high.x, low.y), side, position.y));
     }
-    int value = texelFetch(ChunkMask, 5 + chunk.x + chunk.y * side).r;
-    int floorCode = (value >> 16) & 0xFFFF;
-    bool drawn = (value & 256) != 0 || (value & 3) != 0 && abs(position.y) < intBitsToFloat(texelFetch(ChunkMask, 3).r);
-    return floorCode == 0 || !drawn ? 1.0e9 : float(floorCode) - intBitsToFloat(texelFetch(ChunkMask, 4).r);
+    if (high.y != low.y) {
+        floorHeight = bothFloors(floorHeight, chunkFloor(ivec2(low.x, high.y), side, position.y));
+        if (high.x != low.x) {
+            floorHeight = bothFloors(floorHeight, chunkFloor(high, side, position.y));
+        }
+    }
+    return floorHeight - intBitsToFloat(texelFetch(ChunkMask, 4).r);
 }
 #endif
 

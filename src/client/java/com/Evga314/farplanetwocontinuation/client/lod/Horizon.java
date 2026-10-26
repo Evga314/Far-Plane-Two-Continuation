@@ -82,18 +82,19 @@ final class Horizon {
         private final float[] horizon = new float[BINS];
 
         private int count;
-        private double[] near = new double[1024];
-        private double[] far = new double[1024];
-        private double[] minX = new double[1024];
-        private double[] minZ = new double[1024];
-        private double[] size = new double[1024];
+        // The arrays below are the workspace's, see Workspace; set when the job runs.
+        private double[] near;
+        private double[] far;
+        private double[] minX;
+        private double[] minZ;
+        private double[] size;
         /** Highest point of something that may be hidden, NaN for parts that only hide. */
-        private float[] top = new float[1024];
+        private float[] top;
         /** Lowest surface of something that hides what is behind it, NaN for things that cannot. */
-        private float[] bottom = new float[1024];
-        private TileMesh[] mesh = new TileMesh[1024];
+        private float[] bottom;
+        private TileMesh[] mesh;
         /** Chunk of a detailed tile, -1 for a whole tile. */
-        private int[] chunk = new int[1024];
+        private int[] chunk;
         private final Map<TileMesh, boolean[]> hiddenChunks = new IdentityHashMap<>();
         private final Map<TileMesh, Boolean> occluded = new IdentityHashMap<>();
         private final List<TileMesh> detailTiles;
@@ -206,6 +207,34 @@ final class Horizon {
 
         Result run() {
             long start = System.nanoTime();
+            Workspace work = WORKSPACE;
+            this.near = work.near;
+            this.far = work.far;
+            this.minX = work.minX;
+            this.minZ = work.minZ;
+            this.size = work.size;
+            this.top = work.top;
+            this.bottom = work.bottom;
+            this.mesh = work.mesh;
+            this.chunk = work.chunk;
+            try {
+                return this.cull(work, start);
+            } finally {
+                // Grown arrays are kept for the next job; the tiles are let go of.
+                Arrays.fill(this.mesh, 0, this.count, null);
+                work.near = this.near;
+                work.far = this.far;
+                work.minX = this.minX;
+                work.minZ = this.minZ;
+                work.size = this.size;
+                work.top = this.top;
+                work.bottom = this.bottom;
+                work.mesh = this.mesh;
+                work.chunk = this.chunk;
+            }
+        }
+
+        private Result cull(Workspace work, long start) {
             for (int t = 0; t < this.detailTiles.size(); t++) {
                 this.addDetail(this.detailTiles.get(t), this.detailCuts[t * 2], this.detailCuts[t * 2 + 1]);
             }
@@ -213,17 +242,22 @@ final class Horizon {
                 this.addRough(this.roughTiles.get(t), this.roughCuts[t]);
             }
             Arrays.fill(this.horizon, Float.NEGATIVE_INFINITY);
-            int[] order = new int[this.count];
+            if (work.order.length < this.count) {
+                work.order = new int[this.near.length];
+            }
+            int[] order = work.order;
             for (int i = 0; i < this.count; i++) {
                 order[i] = i;
             }
             double[] nearest = this.near;
             IntArrays.quickSort(order, 0, this.count, (a, b) -> Double.compare(nearest[a], nearest[b]));
-            double[] farthest = this.far;
-            IntHeapPriorityQueue waiting = new IntHeapPriorityQueue((a, b) -> Double.compare(farthest[a], farthest[b]));
+            work.far = this.far;
+            IntHeapPriorityQueue waiting = work.waiting;
+            waiting.clear();
             int hiddenTiles = 0;
             int hiddenChunkCount = 0;
-            for (int i : order) {
+            for (int o = 0; o < this.count; o++) {
+                int i = order[o];
                 // Something hides only what lies completely behind it: along the same direction, a neighbour at the same distance may
                 // just as well be in front of it.
                 while (!waiting.isEmpty() && this.far[waiting.firstInt()] <= this.near[i]) {
@@ -327,6 +361,27 @@ final class Horizon {
             return this.spanScratch;
         }
     }
+
+    /**
+     * The arrays a job works in, kept from job to job instead of made anew every tick: with all tiles in view they hold tens of
+     * thousands of entries. Only one job runs at a time, on the culling thread, so one workspace serves them all.
+     */
+    private static final class Workspace {
+        double[] near = new double[1024];
+        double[] far = new double[1024];
+        double[] minX = new double[1024];
+        double[] minZ = new double[1024];
+        double[] size = new double[1024];
+        float[] top = new float[1024];
+        float[] bottom = new float[1024];
+        TileMesh[] mesh = new TileMesh[1024];
+        int[] chunk = new int[1024];
+        int[] order = new int[1024];
+        /** Things that hide what is behind them, farthest end first; reads {@link #far} as it is when compared. */
+        final IntHeapPriorityQueue waiting = new IntHeapPriorityQueue((a, b) -> Double.compare(this.far[a], this.far[b]));
+    }
+
+    private static final Workspace WORKSPACE = new Workspace();
 
     /** Lowest ground of each part of a rough tile, from its sample heights. */
     static float[] partLows(short[] heights) {

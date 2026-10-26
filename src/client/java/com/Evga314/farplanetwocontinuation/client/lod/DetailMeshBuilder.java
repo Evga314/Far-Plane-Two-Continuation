@@ -1176,7 +1176,8 @@ final class DetailMeshBuilder {
     /** How far under the top of its block vanilla draws the surface of water with nothing over it. */
     private static final float WATER_DIP = 1.0F / 9.0F;
     /** {@link #underwaterLight} for every depth until it stops changing. */
-    private static final float[] UNDERWATER_LIGHT = new float[16];
+    /** How bright things are by how deep under the water they lie, in blocks; also used by VanillaWall. */
+    static final float[] UNDERWATER_LIGHT = new float[16];
     private static final int NO_WATER = Integer.MIN_VALUE;
     /** Sprite sizes take the low 12 bits of their vertex field, see QuadWriter#vertex. */
     private static final int MAX_SPRITE_SIZE = 4095;

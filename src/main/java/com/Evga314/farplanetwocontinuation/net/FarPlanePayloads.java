@@ -123,7 +123,8 @@ public final class FarPlanePayloads {
     /** Detailed tiles to make; {@code generate} asks for chunks nobody has visited yet to be generated in memory. */
     /** {@code urgency}: 0-100, how much loading speed matters to the player now, see {@code WorkThrottle}. */
     /** {@code scanDepth}: how deep columns are scanned, as the player chose; only the owner of a singleplayer world decides it. */
-    public record DetailRequest(int[] requests, boolean generate, int urgency, int scanDepth) implements CustomPacketPayload {
+    /** {@code oreVeins}: whether chunks generated in memory have ore veins, as the player chose; the owner decides it like the depth. */
+    public record DetailRequest(int[] requests, boolean generate, int urgency, int scanDepth, boolean oreVeins) implements CustomPacketPayload {
         public static final Type<DetailRequest> TYPE = new Type<>(id("detail_request"));
         public static final StreamCodec<FriendlyByteBuf, DetailRequest> CODEC = CustomPacketPayload.codec(DetailRequest::write, DetailRequest::read);
 
@@ -131,6 +132,7 @@ public final class FarPlanePayloads {
             buf.writeBoolean(this.generate);
             buf.writeByte(Math.clamp(this.urgency, 0, 100));
             buf.writeVarInt(this.scanDepth);
+            buf.writeBoolean(this.oreVeins);
             int count = this.requests.length / 3;
             buf.writeVarInt(count);
             for (int i = 0; i < count * 3; i++) {
@@ -142,6 +144,7 @@ public final class FarPlanePayloads {
             boolean generate = buf.readBoolean();
             int urgency = Math.clamp(buf.readUnsignedByte(), 0, 100);
             int scanDepth = buf.readVarInt();
+            boolean oreVeins = buf.readBoolean();
             int count = buf.readVarInt();
             if (count < 0 || count > MAX_REQUESTS_PER_PACKET) {
                 throw new DecoderException("Too many detail requests: " + count);
@@ -150,7 +153,7 @@ public final class FarPlanePayloads {
             for (int i = 0; i < requests.length; i++) {
                 requests[i] = buf.readVarInt();
             }
-            return new DetailRequest(requests, generate, urgency, scanDepth);
+            return new DetailRequest(requests, generate, urgency, scanDepth, oreVeins);
         }
 
         @Override

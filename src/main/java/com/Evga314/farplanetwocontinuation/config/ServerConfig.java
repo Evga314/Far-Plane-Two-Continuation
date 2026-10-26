@@ -37,6 +37,12 @@ public class ServerConfig {
      * the world sets it in the detailed terrain settings instead. Changing it makes the chunks generated in memory again.
      */
     public int detailScanDepth = FarPlaneConstants.DEFAULT_SCAN_DEPTH;
+    /**
+     * Ore veins in the overworld chunks generated in memory. Off they are made faster and with much less garbage; the veins lie deep
+     * and only show now and then in the walls of caves and cliffs. In singleplayer the owner of the world sets it in the detailed
+     * terrain settings instead.
+     */
+    public boolean detailOreVeins = false;
     public int detailScanDepthEnd = FarPlaneConstants.DEFAULT_END_SCAN_DEPTH;
 
     public void sanitize() {

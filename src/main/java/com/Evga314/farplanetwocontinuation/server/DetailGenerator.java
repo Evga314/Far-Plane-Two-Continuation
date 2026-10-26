@@ -510,8 +510,15 @@ final class DetailGenerator {
         }
     }
 
-    /** One block column inside a chunk summary; x and z are local to the chunk. */
-    private record Column(ChunkSummary summary, int x, int z, int top) {
+    /**
+     * One block column inside a chunk summary; x and z are local to the chunk. One per generation, filled again for every cell (see
+     * Context#column): a new one for every probe made a good part of the detail readers' garbage.
+     */
+    private static final class Column {
+        ChunkSummary summary;
+        int x;
+        int z;
+        int top;
     }
 
     private static final class Context {
@@ -521,6 +528,8 @@ final class DetailGenerator {
         private final @Nullable ChunkSummaryCache saved;
         private final @Nullable VirtualChunkStore virtual;
         private final Long2ObjectOpenHashMap<ChunkSummary> summaries = new Long2ObjectOpenHashMap<>();
+        /** What {@link #column} returns, valid until it is called again. */
+        private final Column column = new Column();
         private final long baseX;
         private final long baseZ;
         private final int cell;
@@ -554,6 +563,7 @@ final class DetailGenerator {
             long cellX = this.baseX + (long) cx * this.cell;
             long cellZ = this.baseZ + (long) cz * this.cell;
             Column best = null;
+            Column column = this.column;
             for (int pz = 0; pz < this.probes; pz++) {
                 for (int px = 0; px < this.probes; px++) {
                     int x = TileGenerator.clampToWorld(cellX + (long) px * this.probeStep + this.probeStep / 2);
@@ -564,7 +574,11 @@ final class DetailGenerator {
                     }
                     int top = summary.top(x & 15, z & 15);
                     if (best == null || top > best.top) {
-                        best = new Column(summary, x & 15, z & 15, top);
+                        best = column;
+                        column.summary = summary;
+                        column.x = x & 15;
+                        column.z = z & 15;
+                        column.top = top;
                     }
                 }
             }

@@ -27,6 +27,40 @@ final class SodiumFrame {
     private SodiumFrame() {
     }
 
+    /** How many sections with something to draw are in Sodium's render lists of this frame; -1 when that cannot be found out. */
+    static int count(Object renderer) {
+        if (failed) {
+            return -1;
+        }
+        try {
+            Field field = managerField;
+            if (field == null) {
+                field = SodiumWorldRenderer.class.getDeclaredField("renderSectionManager");
+                field.setAccessible(true);
+                managerField = field;
+            }
+            RenderSectionManager manager = (RenderSectionManager) field.get(renderer);
+            if (manager == null) {
+                return -1;
+            }
+            int count = 0;
+            Iterator<ChunkRenderList> lists = manager.getRenderLists().iterator(false);
+            while (lists.hasNext()) {
+                ByteIterator sections = lists.next().sectionsWithGeometryIterator(false);
+                if (sections == null) {
+                    continue;
+                }
+                while (sections.hasNext()) {
+                    sections.nextByteAsInt();
+                    count++;
+                }
+            }
+            return count;
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            return -1;
+        }
+    }
+
     /** Fills {@code out} with the sections Sodium draws in this frame, as SectionPos longs; false when that cannot be found out. */
     static boolean collect(Object renderer, LongOpenHashSet out) {
         out.clear();

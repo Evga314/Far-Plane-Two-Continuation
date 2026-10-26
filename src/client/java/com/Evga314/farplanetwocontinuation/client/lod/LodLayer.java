@@ -6,7 +6,6 @@ import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.logging.LogUtils;
-import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -82,6 +81,30 @@ abstract class LodLayer {
         this.name = name;
         this.detail = "detail".equals(name);
         this.meshExecutor = meshExecutor;
+        this.arena = new VertexArena(name, this.detail ? DETAIL_BLOCK_BYTES : ROUGH_BLOCK_BYTES);
+    }
+
+    /**
+     * Blocks of GPU memory the tiles are put in, see {@link VertexArena}. Detailed tiles are large (a megabyte or two), rough ones
+     * small (tens of kilobytes): in blocks of their own the small ones do not split the room the large ones need.
+     */
+    private final VertexArena arena;
+    private static final int DETAIL_BLOCK_BYTES = 32 << 20;
+    private static final int ROUGH_BLOCK_BYTES = 16 << 20;
+    /**
+     * Makes blocks of GPU memory up to {@code megabytes}, while the world loads (see {@link VertexArena#reserve}), and gives back empty
+     * ones beyond it. Called when no tile is loaded, so a lower amount than before frees memory at once.
+     */
+    void reserveMemory(int megabytes) {
+        int blocks = (int) Math.ceil(megabytes * 1048576.0 / this.arena.blockBytes());
+        this.arena.trim(blocks);
+        this.arena.reserve(blocks);
+    }
+
+    /** Frees the GPU memory of the layer for good, when the game closes. */
+    void closeMemory() {
+        this.reset();
+        this.arena.close();
     }
 
     /** Finest level drawn right now. */
@@ -171,7 +194,7 @@ abstract class LodLayer {
         }
         return this.name + ": tiles=" + this.meshes.size() + " (" + (bytes >> 20) + " MB) drawn=" + this.drawList.size() + " pending="
             + this.pending.size() + " building=" + this.building.size() + " empty=" + this.empty.size() + " wanted=" + this.candidates.size()
-            + " requested=" + this.requested + " evicted=" + this.evicted;
+            + " requested=" + this.requested + " evicted=" + this.evicted + " gpu " + this.arena.stats();
     }
 
     boolean hasWork() {
@@ -185,7 +208,7 @@ abstract class LodLayer {
         this.keptParents.clear();
         this.keptChildren.clear();
         if (this.partial != null) {
-            this.partial.buffer.close();
+            this.partial.part.close();
             this.partial = null;
         }
         for (TileMesh mesh : this.meshes.values()) {
@@ -299,6 +322,7 @@ abstract class LodLayer {
      */
     int upload(int budget, long deadline) {
         int startBudget = budget;
+        this.arena.growAhead();
         while (budget > 0) {
             if (this.partial == null) {
                 // A single upload cannot be interrupted once it starts, so past the deadline no new mesh is started in this call
@@ -325,26 +349,30 @@ abstract class LodLayer {
                     continue;
                 }
                 this.empty.remove(result.key());
-                TilePos pos = TilePos.unpack(result.key());
                 int bytes = result.vertices().remaining();
                 // Every mesh is written in parts over frames, a small one in a single part: on phones one upload of the data
-                // itself can stall a frame for tens of milliseconds, so only the empty buffer is made in one call and the data
-                // follows in parts, each followed by the deadline check below. The tile is only drawn once all of it is there.
-                GpuBuffer buffer = RenderSystem.getDevice().createBuffer(
-                    () -> "FarPlane " + this.name + " tile " + pos, GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST, bytes
-                );
-                this.partial = new PartialUpload(result, buffer);
+                // itself can stall a frame for tens of milliseconds, so only room in a block of GPU memory is taken here (see
+                // VertexArena) and the data follows in parts, each followed by the deadline check below. The tile is only drawn once
+                // all of it is there.
+                this.partial = new PartialUpload(result, this.arena.allocate(bytes));
             }
             PartialUpload upload = this.partial;
+            if (upload.part.buffer.isClosed()) {
+                // Its GPU memory was given back under it (leaving the world closes it all): the mesh is dropped, and built again when
+                // the tile is asked for. Writing to it crashed the game on joining a world again.
+                LOGGER.warn("Dropping the upload of {} tile {}: its GPU memory was already freed", this.name, TilePos.unpack(upload.result.key()));
+                this.partial = null;
+                continue;
+            }
             ByteBuffer data = upload.result.vertices();
             int base = data.position();
             int total = data.remaining();
             int length = Math.min(UPLOAD_PART_BYTES, total - upload.written);
-            RenderSystem.getDevice().createCommandEncoder().writeToBuffer(upload.buffer.slice(upload.written, length), data.slice(base + upload.written, length));
+            RenderSystem.getDevice().createCommandEncoder().writeToBuffer(upload.part.slice(upload.written, length), data.slice(base + upload.written, length));
             upload.written += length;
             if (upload.written >= total) {
                 this.partial = null;
-                this.finishUpload(upload.result, upload.buffer);
+                this.finishUpload(upload.result, upload.part);
                 budget--;
             }
             if (System.nanoTime() >= deadline) {
@@ -354,7 +382,7 @@ abstract class LodLayer {
         return budget;
     }
 
-    private void finishUpload(GeneralMeshFactory.Built result, GpuBuffer buffer) {
+    private void finishUpload(GeneralMeshFactory.Built result, VertexArena.Part buffer) {
         if (PerfLog.ON) {
             PerfLog.uploaded(result.vertices().remaining());
         }
@@ -376,12 +404,12 @@ abstract class LodLayer {
     /** A mesh being written to the GPU in parts, see {@link #upload}. */
     private static final class PartialUpload {
         final GeneralMeshFactory.Built result;
-        final GpuBuffer buffer;
+        final VertexArena.Part part;
         int written;
 
-        PartialUpload(GeneralMeshFactory.Built result, GpuBuffer buffer) {
+        PartialUpload(GeneralMeshFactory.Built result, VertexArena.Part part) {
             this.result = result;
-            this.buffer = buffer;
+            this.part = part;
         }
     }
 

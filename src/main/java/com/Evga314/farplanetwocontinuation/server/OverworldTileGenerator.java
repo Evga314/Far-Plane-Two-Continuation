@@ -27,6 +27,7 @@ import net.minecraft.world.level.levelgen.densityfunction.DensityFunctions;
 import net.minecraft.world.level.levelgen.densityfunction.DensitySampler;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
 import net.minecraft.world.level.levelgen.densityfunction.DfRewriteRule;
+import net.minecraft.world.level.levelgen.densityfunction.DensityBufferPool;
 import net.minecraft.world.level.levelgen.densityfunction.SamplerContext;
 import net.minecraft.world.level.levelgen.densityfunction.op.InterpolatedFunction;
 import net.minecraft.world.level.levelgen.Noises;
@@ -396,14 +397,16 @@ final class OverworldTileGenerator {
             this.randomState = randomState;
             this.minY = minY;
             this.maxY = maxY;
-            SamplerContext context = SamplerContext.builder().enableCaches().build();
+            // Buffers come from pools of this state, which only its thread uses: without one, vanilla makes new buffers for every
+            // value sampled, the most garbage the rough tiles make.
+            SamplerContext context = SamplerContext.builder().enableCaches().useBufferArena(new DensityBufferPool(20)).build();
             if (generator instanceof NoiseBasedChunkGenerator noise) {
                 NoiseRouter router = noise.generatorSettings().value().noiseRouter();
                 this.fast = new DensitySurface(noise, randomState, minY, maxY, context, router.finalDensity());
                 DensityFunction terrain = terrainWithoutCaves(router.finalDensity());
                 // A context of its own: its caches are those of another sampler.
                 DensitySurface far = terrain != null
-                    ? new DensitySurface(noise, randomState, minY, maxY, SamplerContext.builder().enableCaches().build(), terrain)
+                    ? new DensitySurface(noise, randomState, minY, maxY, SamplerContext.builder().enableCaches().useBufferArena(new DensityBufferPool(20)).build(), terrain)
                     : this.fast;
                 if (terrain != null && !terrainMatches(far, this.fast)) {
                     // A worldgen pack can give another shape the name of the terrain without caves; far tiles then fall back

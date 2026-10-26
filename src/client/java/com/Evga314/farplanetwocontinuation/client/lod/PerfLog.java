@@ -77,6 +77,24 @@ public final class PerfLog {
     public static final String[] PASSES = {"rough", "under detail", "detail", "fade", "water", "depth"};
     private static int pass;
     private static final long[] passTriangles = new long[PASSES.length];
+    /** Parts of the LOD pass on the render thread, timed separately; see LodRenderer.renderLod. */
+    public static final String[] RENDER_PHASES = {"edge check", "cull", "sort", "transforms", "mask", "draw", "water", "depth"};
+    private static final long[] renderPhaseNs = new long[RENDER_PHASES.length];
+    private static final long[] renderPhaseNsSum = new long[RENDER_PHASES.length];
+    // Parts of the uploads: making the empty buffers, writing the data into them, and freeing the buffers of old tiles.
+    private static long createNs;
+    private static int creates;
+    private static long createdBytes;
+    private static long freeNs;
+    private static int frees;
+    private static long createNsSum;
+    private static long createNsMax;
+    private static int createsSum;
+    private static long freeNsSum;
+    private static long freeNsMax;
+    private static int freesSum;
+    /** The client tick within the frame, which the spike lines show too. */
+    private static long frameTickNs;
     private static long trianglesSum;
     private static long uploadNsSum;
     private static long uploadNsMax;
@@ -122,6 +140,7 @@ public final class PerfLog {
     // CPU time of every thread at the last summary.
     // RU: процессорное время каждого ядра в последней сводке.
     private static final Map<Long, Long> threadCpu = new HashMap<>();
+    private static final Map<Long, Long> threadAlloc = new HashMap<>();
 
     private PerfLog() {
     }
@@ -166,6 +185,13 @@ public final class PerfLog {
         triangles = 0L;
         frameGcCount = 0L;
         frameGcTime = 0L;
+        Arrays.fill(renderPhaseNs, 0L);
+        createNs = 0L;
+        creates = 0;
+        createdBytes = 0L;
+        freeNs = 0L;
+        frees = 0;
+        frameTickNs = 0L;
         if (now - summaryStart >= SUMMARY_NS) {
             summary(now);
         }
@@ -175,6 +201,33 @@ public final class PerfLog {
         uploadNs += nanos;
         uploadNsSum += nanos;
         uploadNsMax = Math.max(uploadNsMax, uploadNs);
+    }
+
+    /** A buffer made for tiles' meshes, see VertexArena. */
+    public static void bufferCreated(long nanos, long bytes) {
+        createdBytes += bytes;
+        creates++;
+        createsSum++;
+        createNs += nanos;
+        createNsSum += nanos;
+        createNsMax = Math.max(createNsMax, createNs);
+    }
+
+    /** The buffer of a tile's mesh freed, see TileMesh.close. */
+    public static void bufferFreed(long nanos) {
+        frees++;
+        freesSum++;
+        freeNs += nanos;
+        freeNsSum += nanos;
+        freeNsMax = Math.max(freeNsMax, freeNs);
+    }
+
+    /** Adds the time since {@code start} to a part of the LOD pass, see {@link #RENDER_PHASES}; returns the time now. */
+    public static long renderPhase(int phase, long start) {
+        long now = System.nanoTime();
+        renderPhaseNs[phase] += now - start;
+        renderPhaseNsSum[phase] += now - start;
+        return now;
     }
 
     public static void uploaded(long bytes) {
@@ -206,6 +259,7 @@ public final class PerfLog {
 
     public static void tickTime(long nanos) {
         ticks++;
+        frameTickNs += nanos;
         tickNsSum += nanos;
         tickNsMax = Math.max(tickNsMax, nanos);
     }
@@ -246,6 +300,21 @@ public final class PerfLog {
     public static void horizonTime(long nanos) {
         horizonNsSum += nanos;
         horizonNsMax = Math.max(horizonNsMax, nanos);
+    }
+
+    private static long flickerWindow;
+    private static int flickerLines;
+
+    /** Something that can make the rough terrain flash over vanilla's chunks, see LodManager.watchMask; at most 20 lines a second. */
+    public static void flicker(String what) {
+        long now = System.nanoTime();
+        if (now - flickerWindow > 1_000_000_000L) {
+            flickerWindow = now;
+            flickerLines = 0;
+        }
+        if (flickerLines++ < 20) {
+            LOGGER.info("[FarPlane flicker] {}", what);
+        }
     }
 
     /**
@@ -361,10 +430,15 @@ public final class PerfLog {
     private static void logSpike(long frame) {
         LodManager manager = com.Evga314.farplanetwocontinuation.client.FarplanetwocontinuationClient.manager();
         Runtime runtime = Runtime.getRuntime();
+        StringBuilder phases = new StringBuilder();
+        for (int phase = 0; phase < RENDER_PHASES.length; phase++) {
+            phases.append(String.format(Locale.ROOT, " %s %.1f", RENDER_PHASES[phase], renderPhaseNs[phase] / 1e6));
+        }
         LOGGER.info(String.format(Locale.ROOT,
-            "[FarPlane perf] spike %.1f ms (usual %.1f): upload %d tiles %.2f MB in %.1f ms, lod pass cpu %.1f ms with %d draws, gc %d (%d ms), "
-                + "heap %d/%d MB, %s",
-            frame / 1e6, averageFrame / 1e6, uploads, uploadBytes / 1048576.0, uploadNs / 1e6, renderNs / 1e6, draws, frameGcCount, frameGcTime,
+            "[FarPlane perf] spike %.1f ms (usual %.1f): upload %d tiles %.2f MB in %.1f ms (new buffers %d of %.0f MB in %.1f ms, freed %d in %.1f ms), "
+                + "lod pass cpu %.1f ms with %d draws (%s), client tick %.1f ms, gc %d (%d ms), heap %d/%d MB, %s",
+            frame / 1e6, averageFrame / 1e6, uploads, uploadBytes / 1048576.0, uploadNs / 1e6, creates, createdBytes / 1048576.0, createNs / 1e6, frees, freeNs / 1e6,
+            renderNs / 1e6, draws, phases.toString().trim(), frameTickNs / 1e6, frameGcCount, frameGcTime,
             (runtime.totalMemory() - runtime.freeMemory()) >> 20, runtime.maxMemory() >> 20, manager == null ? "" : manager.debugStats()));
     }
 
@@ -393,6 +467,12 @@ public final class PerfLog {
             passTriangles[p] = 0L;
         }
         line.append(')');
+        line.append(" (cpu by part avg");
+        for (int phase = 0; phase < RENDER_PHASES.length; phase++) {
+            line.append(String.format(Locale.ROOT, " %s %.2f", RENDER_PHASES[phase], renderPhaseNsSum[phase] / 1e6 / frames));
+            renderPhaseNsSum[phase] = 0L;
+        }
+        line.append(" ms)");
         if (gpuSamples > 0) {
             line.append(String.format(Locale.ROOT, ", gpu avg %.2f max %.1f ms", gpuNsSum / 1e6 / gpuSamples, gpuNsMax / 1e6));
         } else if (!gpuFailed) {
@@ -400,6 +480,9 @@ public final class PerfLog {
         }
         line.append(String.format(Locale.ROOT, " | upload %d tiles %.1f MB, max %.1f ms/frame | client tick avg %.2f max %.1f ms",
             uploadsSum, uploadBytesSum / 1048576.0, uploadNsMax / 1e6, ticks == 0 ? 0.0 : tickNsSum / 1e6 / ticks, tickNsMax / 1e6));
+        line.append(String.format(Locale.ROOT, " (new buffers %d avg %.2f ms, max %.1f ms/frame, freed %d avg %.2f ms, max %.1f ms/frame)",
+            createsSum, createsSum == 0 ? 0.0 : createNsSum / 1e6 / createsSum, createNsMax / 1e6,
+            freesSum, freesSum == 0 ? 0.0 : freeNsSum / 1e6 / freesSum, freeNsMax / 1e6));
         line.append(String.format(Locale.ROOT, " (occlusion %s avg %.2f max %.1f ms)", occlusionOff ? "OFF" : "on",
             ticks == 0 ? 0.0 : horizonNsSum / 1e6 / ticks, horizonNsMax / 1e6));
         line.append(" tick parts avg");
@@ -450,6 +533,12 @@ public final class PerfLog {
         uploadNsMax = 0L;
         uploadsSum = 0;
         uploadBytesSum = 0L;
+        createNsSum = 0L;
+        createNsMax = 0L;
+        createsSum = 0;
+        freeNsSum = 0L;
+        freeNsMax = 0L;
+        freesSum = 0;
         renderNsSum = 0L;
         renderNsMax = 0L;
         drawsSum = 0L;
@@ -484,11 +573,27 @@ public final class PerfLog {
             }
             long[] ids = bean.getAllThreadIds();
             ThreadInfo[] infos = bean.getThreadInfo(ids);
+            // Memory every thread allocated, where the JVM counts it (HotSpot does): what makes the garbage collector run.
+            long[] allocated = null;
+            if (bean instanceof com.sun.management.ThreadMXBean counting && counting.isThreadAllocatedMemorySupported()) {
+                if (!counting.isThreadAllocatedMemoryEnabled()) {
+                    counting.setThreadAllocatedMemoryEnabled(true);
+                }
+                allocated = counting.getThreadAllocatedBytes(ids);
+            }
             Map<String, double[]> groups = new TreeMap<>();
+            Map<String, double[]> allocGroups = new TreeMap<>();
             Map<Long, Long> seen = new HashMap<>();
+            Map<Long, Long> seenAlloc = new HashMap<>();
             for (int i = 0; i < ids.length; i++) {
                 if (infos[i] == null) {
                     continue;
+                }
+                String group = infos[i].getThreadName().replaceAll("[#-]?\\d+$", "").trim();
+                if (allocated != null && allocated[i] >= 0L) {
+                    seenAlloc.put(ids[i], allocated[i]);
+                    Long before = threadAlloc.get(ids[i]);
+                    allocGroups.computeIfAbsent(group, key -> new double[2])[0] += before == null ? 0L : allocated[i] - before;
                 }
                 long cpu = bean.getThreadCpuTime(ids[i]);
                 if (cpu < 0L) {
@@ -497,13 +602,15 @@ public final class PerfLog {
                 seen.put(ids[i], cpu);
                 Long before = threadCpu.get(ids[i]);
                 long used = before == null ? 0L : cpu - before;
-                String group = infos[i].getThreadName().replaceAll("[#-]?\\d+$", "").trim();
                 double[] sum = groups.computeIfAbsent(group, key -> new double[2]);
                 sum[0] += used;
                 sum[1]++;
             }
             threadCpu.clear();
             threadCpu.putAll(seen);
+            threadAlloc.clear();
+            threadAlloc.putAll(seenAlloc);
+            String alloc = allocated == null ? "" : allocation(allocGroups, seconds);
             List<Map.Entry<String, double[]>> busiest = new ArrayList<>(groups.entrySet());
             busiest.sort((a, b) -> Double.compare(b.getValue()[0], a.getValue()[0]));
             StringBuilder text = new StringBuilder();
@@ -516,10 +623,29 @@ public final class PerfLog {
                 text.append(String.format(Locale.ROOT, "%s%s %.0f%%%s", i == 0 ? "" : ", ", entry.getKey(), percent,
                     entry.getValue()[1] > 1 ? " (" + (int) entry.getValue()[1] + ")" : ""));
             }
-            return text.toString();
+            return text.append(alloc).toString();
         } catch (Throwable e) {
             return "cpu time failed: " + e;
         }
+    }
+
+    /** Memory allocated per second by all threads and by the groups allocating most, at least 1 MB/s. */
+    private static String allocation(Map<String, double[]> groups, double seconds) {
+        double total = 0.0;
+        for (double[] sum : groups.values()) {
+            total += sum[0];
+        }
+        List<Map.Entry<String, double[]>> busiest = new ArrayList<>(groups.entrySet());
+        busiest.sort((a, b) -> Double.compare(b.getValue()[0], a.getValue()[0]));
+        StringBuilder text = new StringBuilder(String.format(Locale.ROOT, " | allocated %.0f MB/s:", total / 1048576.0 / seconds));
+        for (int i = 0; i < Math.min(10, busiest.size()); i++) {
+            double perSecond = busiest.get(i).getValue()[0] / 1048576.0 / seconds;
+            if (perSecond < 1.0) {
+                break;
+            }
+            text.append(String.format(Locale.ROOT, "%s %s %.0f", i == 0 ? "" : ",", busiest.get(i).getKey(), perSecond));
+        }
+        return text.toString();
     }
 
     /** CPU core frequencies and the hottest thermal zone, where the system lets them be read (Linux and Android). */

@@ -96,6 +96,7 @@ public final class TileServer {
     };
     /** Scan depths the owner of a singleplayer world chose in the detailed terrain settings; they replace the config file there. */
     private final Map<DimensionKind, Integer> ownerScanDepths = new ConcurrentHashMap<>();
+    private final Map<DimensionKind, Boolean> ownerOreVeins = new ConcurrentHashMap<>();
 
     public TileServer(MinecraftServer server, ServerConfig config) {
         this.server = server;
@@ -635,13 +636,14 @@ public final class TileServer {
         this.accept(player, requests, false);
     }
 
-    public void onDetailRequest(ServerPlayer player, int[] requests, boolean generate, float urgency, int scanDepth) {
+    public void onDetailRequest(ServerPlayer player, int[] requests, boolean generate, float urgency, int scanDepth, boolean oreVeins) {
         PlayerState state = this.players.computeIfAbsent(player.getUUID(), uuid -> new PlayerState());
         state.generateVirtual = generate;
         state.urgency = urgency;
         // Only the owner of a singleplayer world chooses the depth; the summaries it makes are shared by everyone.
         if (scanDepth > 0 && this.server.isSingleplayerOwner(player.nameAndId())) {
             this.ownerScanDepths.put(DimensionKind.of(player.level()), ServerConfig.scanDepth(scanDepth));
+            this.ownerOreVeins.put(DimensionKind.of(player.level()), oreVeins);
         }
         this.accept(player, requests, true);
     }
@@ -651,7 +653,10 @@ public final class TileServer {
         DimensionKind kind = DimensionKind.of(level);
         Integer chosen = this.ownerScanDepths.get(kind);
         int depth = chosen != null ? chosen : kind == DimensionKind.END ? this.config.detailScanDepthEnd : this.config.detailScanDepth;
-        return new ChunkSummary.Scan(depth, kind == DimensionKind.END);
+        // Ore veins are a setting of the overworld only; elsewhere chunks are made as the world makes them.
+        Boolean veins = this.ownerOreVeins.get(kind);
+        boolean oreVeins = kind != DimensionKind.OVERWORLD || (veins != null ? veins : this.config.detailOreVeins);
+        return new ChunkSummary.Scan(depth, kind == DimensionKind.END, oreVeins);
     }
 
     private void accept(ServerPlayer player, int[] requests, boolean detail) {

@@ -82,6 +82,12 @@ public class DetailConfigScreen extends OptionsSubScreen {
         this.list.addBig(blocks);
         this.list.addBig(memory);
         this.list.addBig(depth);
+        if (this.dimension == DimensionKind.OVERWORLD) {
+            this.list.addBig(OptionInstance.createBoolean(
+                PREFIX + "ore_veins", OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "ore_veins.tooltip")), config.oreVeins,
+                value -> config.oreVeins = value
+            ));
+        }
     }
 
     @Override

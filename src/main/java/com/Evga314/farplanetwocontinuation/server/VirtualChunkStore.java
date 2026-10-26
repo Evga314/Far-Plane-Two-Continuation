@@ -242,7 +242,7 @@ final class VirtualChunkStore {
                 ProtoChunk[] made;
                 this.generating.add(key);
                 try {
-                    made = terrain.generate(minX, minZ, maxX - minX + 1, maxZ - minZ + 1);
+                    made = terrain.generate(minX, minZ, maxX - minX + 1, maxZ - minZ + 1, scan.oreVeins());
                 } finally {
                     this.generating.remove(key);
                 }
@@ -266,6 +266,16 @@ final class VirtualChunkStore {
             return region;
         }
     }
+
+    /**
+     * The scan as kept in the header of a region: its depth, with a bit for ore veins (regions saved before there was a choice have
+     * none, and count as made without them).
+     */
+    private static int scanCode(ChunkSummary.Scan scan) {
+        return scan.depth() | (scan.oreVeins() ? ORE_VEINS_BIT : 0);
+    }
+
+    private static final int ORE_VEINS_BIT = 0x4000;
 
     /** Whether the summaries of a region were made with a scan; all of them always are made with the same one. */
     private static boolean scannedWith(ChunkSummary[] region, ChunkSummary.Scan scan) {
@@ -340,7 +350,7 @@ final class VirtualChunkStore {
                 return null;
             }
             DataInputStream header = new DataInputStream(new ByteArrayInputStream(Files.readAllBytes(file)));
-            if (header.readInt() != MAGIC || header.readInt() != FORMAT || header.readLong() != this.seed || header.readShort() != scan.depth()) {
+            if (header.readInt() != MAGIC || header.readInt() != FORMAT || header.readLong() != this.seed || header.readShort() != scanCode(scan)) {
                 return null;
             }
             try (InputStream body = Zip.decompress(header)) {
@@ -427,7 +437,7 @@ final class VirtualChunkStore {
             header.writeInt(MAGIC);
             header.writeInt(FORMAT);
             header.writeLong(this.seed);
-            header.writeShort(scan.depth());
+            header.writeShort(scanCode(scan));
             header.flush();
             try (DataOutputStream out = new DataOutputStream(Zip.compress(bytes))) {
                 out.writeShort(ordered.size());

@@ -14,6 +14,14 @@
 
 But... wait. I have an idea to add underground generation for the far terrain too. Just generate caves only if you are already underground, and only in about ~32 chunks around the player
 
+
+ с оптимизированным рендерером туман (встроенный и вилимо из модов)ломается 
+
+ есть еще конфликт слоёв (видимо мировое дно) в некоторых щелях
+
+ добавить поддержку мода Fog
+
+
 брать для генерации виртуальных чанков кеш из ванильных сгенерированных чанков
 
 

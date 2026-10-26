@@ -20,6 +20,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.EmptyLevelChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
@@ -100,7 +101,13 @@ final class LodView {
     private final Long2LongOpenHashMap floors = new Long2LongOpenHashMap();
     private static final int FLOOR_REFRESH_TICKS = 200;
     private static final int FLOOR_REFRESHES_PER_TICK = 4;
+    /**
+     * New chunks worked out per tick at most: flying fast with a long render distance many come in at once, and on a phone each costs
+     * a fair share of a tick over the sea. The rest wait for the next ticks and lower the rough terrain under them only then.
+     */
+    private static final int NEW_FLOORS_PER_TICK = 8;
     private int floorRefreshes;
+    private int newFloors;
     private long ticks;
     /** The sections the surface of a chunk lies in, see vanillaDrawsChunk; kept instead of made for every chunk. */
     private final int[] surfaceSections = new int[SURFACE_PROBES.length / 2 * 3];
@@ -169,6 +176,7 @@ final class LodView {
         this.sodiumReady.clear();
         this.ticks++;
         this.floorRefreshes = FLOOR_REFRESHES_PER_TICK;
+        this.newFloors = NEW_FLOORS_PER_TICK;
         int half = renderDistance + 1;
         int side = 2 * half + 1;
         if (this.chunkGrid.length != side * side) {
@@ -216,6 +224,8 @@ final class LodView {
         }
         if (known != Long.MIN_VALUE) {
             this.floorRefreshes--;
+        } else if (this.newFloors-- <= 0) {
+            return NO_FLOOR;
         }
         int lowest = Integer.MAX_VALUE;
         BlockPos.MutableBlockPos pos = this.floorScratch;
@@ -226,7 +236,16 @@ final class LodView {
                 // The ground heightmap stops at the top of water and lava; the bottom under them is looked for, as far as FLOOR_SEARCH.
                 int y = chunk.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
                 int limit = Math.max(this.worldMinY, y - FLOOR_SEARCH);
-                while (y > limit && !chunk.getBlockState(pos.set(baseX + x, y, baseZ + z)).getFluidState().isEmpty()) {
+                while (y > limit) {
+                    // A section of nothing but water or lava is passed in one step.
+                    LevelChunkSection section = chunk.getSection(chunk.getSectionIndex(y));
+                    if (!section.getStates().maybeHas(state -> state.getFluidState().isEmpty())) {
+                        y = Math.max(limit, SectionPos.sectionToBlockCoord(SectionPos.blockToSectionCoord(y)) - 1);
+                        continue;
+                    }
+                    if (chunk.getBlockState(pos.set(baseX + x, y, baseZ + z)).getFluidState().isEmpty()) {
+                        break;
+                    }
                     y--;
                 }
                 lowest = Math.min(lowest, y);
@@ -239,14 +258,30 @@ final class LodView {
 
     /**
      * The camera of the frame being drawn, for what is asked of vanilla's chunks within the frame (see LodManager.frameCheck): Sodium's
-     * render distance is measured from it, and what it has built is asked anew.
+     * render distance is measured from it, and what Sodium draws in it is read (see SodiumFrame).
      */
     void frameCamera(double x, double y, double z) {
         this.camX = x;
         this.camY = y;
         this.camZ = z;
-        this.sodiumReady.clear();
         this.visibleSections = null;
+        this.frameKnown = this.sodium != null && SodiumFrame.collect(this.sodium, this.frameSections);
+    }
+
+    void forgetFrame() {
+        this.frameKnown = false;
+    }
+
+    /** The sections Sodium draws in the last frame, see {@link SodiumFrame}; valid while {@link #frameKnown}. */
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet frameSections = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    private boolean frameKnown;
+
+    /**
+     * Whether what Sodium draws in a frame is known: then along the edge of what vanilla draws a detailed tile gives way exactly in the
+     * frame Sodium starts drawing a section, not when Sodium has built it, which it may draw a frame or more later.
+     */
+    boolean frameKnown() {
+        return this.frameKnown;
     }
 
     /** Vertical distance to the whole build height, used when nothing better is known about a tile. */
@@ -469,6 +504,12 @@ final class LodView {
      * The tile keeps such a chunk and leaves out exactly the sections vanilla has built.
      */
     Coverage coverage(int chunkX, int chunkZ, int lowY, int highY) {
+        return this.coverage(chunkX, chunkZ, lowY, highY, false);
+    }
+
+    /** {@code byFrame}: with Sodium, a section counts as drawn when Sodium draws it in this frame, see {@link #frameKnown}. */
+    Coverage coverage(int chunkX, int chunkZ, int lowY, int highY, boolean byFrame) {
+        boolean frame = byFrame && this.frameKnown;
         this.drawnSections = 0;
         this.lowestSection = 0;
         if (lowY > highY) {
@@ -502,7 +543,9 @@ final class LodView {
         boolean all = true;
         for (int sectionY = lowSection; sectionY <= highSection; sectionY++) {
             boolean drawn = sodium != null
-                ? this.sodiumSectionDrawn(sodium, chunkX, chunkZ, sectionY)
+                ? frame
+                    ? this.sodiumInReach(chunkX, chunkZ, sectionY) && this.frameSections.contains(SectionPos.asLong(chunkX, sectionY, chunkZ))
+                    : this.sodiumSectionDrawn(sodium, chunkX, chunkZ, sectionY)
                 : this.sectionBuilt(viewArea, cameraSection, chunkX, chunkZ, sectionY, sectionY == highSection);
             if (drawn) {
                 mask |= 1 << (sectionY - lowSection);

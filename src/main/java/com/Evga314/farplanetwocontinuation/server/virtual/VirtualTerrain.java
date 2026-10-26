@@ -135,6 +135,21 @@ public final class VirtualTerrain {
     public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_BUILT = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_REUSED = new java.util.concurrent.atomic.AtomicLong();
     private static final java.lang.management.ThreadMXBean THREADS = java.lang.management.ManagementFactory.getThreadMXBean();
+    /**
+     * Threads that help generate one region, besides the thread that asked for it: terrain of every chunk on its own, decoration in
+     * waves of chunks far enough apart (see {@link #generate}). Phones keep to one thread: there the cores are few and they heat up.
+     */
+    private static final int HELPERS = com.Evga314.farplanetwocontinuation.FarPlaneConstants.ANDROID
+        ? 0 : Math.clamp(Runtime.getRuntime().availableProcessors() - 3, 0, 7);
+    private static final java.util.concurrent.atomic.AtomicInteger HELPER_COUNTER = new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.ExecutorService HELPER_POOL = HELPERS == 0 ? null : java.util.concurrent.Executors.newFixedThreadPool(HELPERS, runnable -> {
+        com.Evga314.farplanetwocontinuation.WorkThrottle.Worker thread = new com.Evga314.farplanetwocontinuation.WorkThrottle.Worker(
+            runnable, "FarPlane virtual helper #" + HELPER_COUNTER.incrementAndGet());
+        thread.setDaemon(true);
+        thread.setPriority(Thread.MIN_PRIORITY);
+        thread.setUncaughtExceptionHandler((t, e) -> LOGGER.error("Uncaught error in {}", t.getName(), e));
+        return thread;
+    });
     private static final EnumSet<Heightmap.Types> RESTORED_HEIGHTMAPS = EnumSet.of(
         Heightmap.Types.WORLD_SURFACE_WG, Heightmap.Types.OCEAN_FLOOR_WG, Heightmap.Types.MOTION_BLOCKING,
         Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Heightmap.Types.OCEAN_FLOOR, Heightmap.Types.WORLD_SURFACE
@@ -239,39 +254,49 @@ public final class VirtualTerrain {
         if (PERF) {
             long now = THREADS.getCurrentThreadCpuTime();
             PERF_PREPARE_NANOS.addAndGet(now - cpu);
-            cpu = now;
         }
 
-        for (int z = 1; z < sizeZ - 1; z++) {
-            for (int x = 1; x < sizeX - 1; x++) {
-                int index = x + z * sizeX;
-                ProtoChunk chunk = area[index];
-                WorkThrottle.yieldToFrames();
-                this.addReferences(chunk);
-                if (!chunk.getPersistedStatus().isOrAfter(ChunkStatus.TERRAIN)) {
-                    this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1]);
-                    this.storeTerrain(chunk);
-                    if (PERF) {
-                        PERF_TERRAIN_BUILT.incrementAndGet();
-                    }
-                } else if (PERF) {
-                    PERF_TERRAIN_REUSED.incrementAndGet();
+        // Terrain: every chunk writes only into itself, so all of them are built at once on the helper threads.
+        int innerX = sizeX - 2;
+        int innerZ = sizeZ - 2;
+        parallel(innerX * innerZ, i -> {
+            long taskCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
+            int index = (1 + i % innerX) + (1 + i / innerX) * sizeX;
+            ProtoChunk chunk = area[index];
+            WorkThrottle.yieldToFrames();
+            this.addReferences(chunk);
+            if (!chunk.getPersistedStatus().isOrAfter(ChunkStatus.TERRAIN)) {
+                this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1]);
+                this.storeTerrain(chunk);
+                if (PERF) {
+                    PERF_TERRAIN_BUILT.incrementAndGet();
                 }
+            } else if (PERF) {
+                PERF_TERRAIN_REUSED.incrementAndGet();
             }
-        }
-        if (PERF) {
-            long now = THREADS.getCurrentThreadCpuTime();
-            PERF_TERRAIN_NANOS.addAndGet(now - cpu);
-            cpu = now;
-        }
-        for (int z = 2; z < sizeZ - 2; z++) {
-            for (int x = 2; x < sizeX - 2; x++) {
+            if (PERF) {
+                PERF_TERRAIN_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - taskCpu);
+            }
+        });
+        // Decoration: trees and other features reach into the chunks next to theirs, and read them. Chunks three apart never touch
+        // the same chunks, so each of nine waves decorates such chunks at once, and the waves follow one another.
+        int decoX = sizeX - 4;
+        int decoZ = sizeZ - 4;
+        for (int wave = 0; wave < 9; wave++) {
+            int offsetX = wave % 3;
+            int offsetZ = wave / 3;
+            int countX = Math.max(0, (decoX - offsetX + 2) / 3);
+            int countZ = Math.max(0, (decoZ - offsetZ + 2) / 3);
+            parallel(countX * countZ, i -> {
+                long taskCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
+                int x = 2 + offsetX + (i % countX) * 3;
+                int z = 2 + offsetZ + (i / countX) * 3;
                 WorkThrottle.yieldToFrames();
                 this.decorate(chunks, area[x + z * sizeX]);
-            }
-        }
-        if (PERF) {
-            PERF_DECORATE_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - cpu);
+                if (PERF) {
+                    PERF_DECORATE_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - taskCpu);
+                }
+            });
         }
 
         ProtoChunk[] result = new ProtoChunk[width * depth];
@@ -281,6 +306,53 @@ public final class VirtualTerrain {
             }
         }
         return result;
+    }
+
+    /**
+     * Runs {@code task} for 0 to {@code count - 1}, on the calling thread and the helper threads at once, and returns once all are
+     * done. A failure on any thread is thrown here, and the rest of the work is dropped.
+     */
+    private static void parallel(int count, java.util.function.IntConsumer task) {
+        if (HELPER_POOL == null || count <= 1) {
+            for (int i = 0; i < count; i++) {
+                task.accept(i);
+            }
+            return;
+        }
+        java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
+        Runnable work = () -> {
+            for (int i = next.getAndIncrement(); i < count; i = next.getAndIncrement()) {
+                task.accept(i);
+            }
+        };
+        int helpers = Math.min(HELPERS, count - 1);
+        java.util.List<java.util.concurrent.Future<?>> running = new ArrayList<>(helpers);
+        for (int h = 0; h < helpers; h++) {
+            running.add(HELPER_POOL.submit(work));
+        }
+        RuntimeException failure = null;
+        try {
+            work.run();
+        } catch (RuntimeException e) {
+            failure = e;
+            next.set(count);
+        }
+        for (java.util.concurrent.Future<?> future : running) {
+            try {
+                future.get();
+            } catch (java.util.concurrent.ExecutionException e) {
+                next.set(count);
+                if (failure == null) {
+                    failure = e.getCause() instanceof RuntimeException runtime ? runtime : new IllegalStateException(e.getCause());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                next.set(count);
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     /**
@@ -616,12 +688,15 @@ public final class VirtualTerrain {
 
         private VirtualHolder holder(int x, int z) {
             long key = ChunkPos.pack(x, z);
-            VirtualHolder holder = this.holders.get(key);
-            if (holder == null) {
-                holder = new VirtualHolder(new ChunkPos(x, z), this.chunkAt(x, z));
-                this.holders.put(key, holder);
+            // Regions are made on several threads at once, see VirtualTerrain#parallel.
+            synchronized (this.holders) {
+                VirtualHolder holder = this.holders.get(key);
+                if (holder == null) {
+                    holder = new VirtualHolder(new ChunkPos(x, z), this.chunkAt(x, z));
+                    this.holders.put(key, holder);
+                }
+                return holder;
             }
-            return holder;
         }
 
         private ChunkAccess chunkAt(int x, int z) {

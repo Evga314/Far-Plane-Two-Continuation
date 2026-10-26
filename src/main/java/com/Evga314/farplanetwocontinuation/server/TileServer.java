@@ -219,6 +219,15 @@ public final class TileServer {
                 detail += state.detailQueue.size() + state.detailInFlight;
             }
             ServerPerf.summary(this.server.getAverageTickTimeNanos() / 1e6, rough, detail);
+            ServerPerf.threads(this.executor.getMaximumPoolSize(), this.detailExecutor.getMaximumPoolSize(), this.config.maxInFlightPerPlayer);
+        }
+        if (ServerPerf.ON) {
+            for (PlayerState state : this.players.values()) {
+                ServerPerf.ROUGH_IN_FLIGHT.addAndGet(state.roughInFlight);
+                ServerPerf.DETAIL_IN_FLIGHT.addAndGet(state.detailInFlight);
+                ServerPerf.DETAIL_LIMIT.addAndGet(this.detailLimit(state));
+            }
+            ServerPerf.IN_FLIGHT_TICKS.incrementAndGet();
         }
         if (++this.ticks % DIRTY_FLUSH_TICKS != 0) {
             return;
@@ -693,35 +702,63 @@ public final class TileServer {
      * Rough and detailed tiles have separate queues and limits. Detailed tiles can be slow because they read chunks from disk or
      * generate them, and without the split they would hold back the cheap rough tiles that fill the view first. Both share the CPU in
      * this order: rough tiles that fill a hole, detailed tiles, rough tiles that only refine distant terrain. While any player waits
-     * for detailed tiles, refining goes on with a single tile at a time.
+     * for detailed tiles, refining takes only the generator threads the detailed tiles leave free, so between them they fill the cores
+     * the mod may use and no more; the detailed tiles run at a higher priority besides.
      */
     private void pump(ServerPlayer player, PlayerState state) {
         boolean detailBusy = false;
+        int detailRunning = 0;
         for (PlayerState other : this.players.values()) {
             detailBusy |= !other.detailQueue.isEmpty() || other.detailInFlight > 0;
+            detailRunning += other.detailInFlight;
         }
-        this.pump(player, state, false, this.config.maxInFlightPerPlayer, detailBusy);
-        // As many detailed tiles at once as loading is urgent for this player: one or a few while walking, all threads while flying.
-        // While distant terrain is generated ahead of time, detailed tiles go on in the background, one at a time.
-        int calm = this.config.resolvedCalmDetailThreads();
-        int all = this.config.resolvedDetailThreads();
-        int detailLimit = this.distantPregen != null ? 1 : calm + Math.round((all - calm) * state.urgency);
-        this.pump(player, state, true, detailLimit, false);
+        int refineLimit = detailBusy ? Math.max(1, this.config.resolvedThreads() - detailRunning) : this.config.maxInFlightPerPlayer;
+        this.pump(player, state, false, this.config.maxInFlightPerPlayer, refineLimit);
+        int detailLimit = this.detailLimit(state);
+        this.pump(player, state, true, detailLimit, detailLimit);
     }
 
-    private void pump(ServerPlayer player, PlayerState state, boolean detail, int limit, boolean refineSlowly) {
+    /**
+     * How many detailed tiles of a player are worked on at once: as many as loading is urgent for this player, one or a few while
+     * walking, all threads while flying. While distant terrain is generated ahead of time, one at a time in the background. On phones
+     * fewer the farther vanilla draws: vanilla then generates and builds many chunks itself, and with all cores busy and hot the frames
+     * stutter.
+     */
+    private int detailLimit(PlayerState state) {
+        if (this.distantPregen != null) {
+            return 1;
+        }
+        int calm = this.config.resolvedCalmDetailThreads();
+        int all = this.config.resolvedDetailThreads();
+        if (FarPlaneConstants.ANDROID) {
+            all = Math.clamp(all - (this.server.getPlayerList().getViewDistance() - 2) / 3, calm, all);
+        }
+        return calm + Math.round((all - calm) * state.urgency);
+    }
+
+    /** {@code refineLimit}: at most this many tiles in flight once only tiles that refine distant terrain are left to hand out. */
+    private void pump(ServerPlayer player, PlayerState state, boolean detail, int limit, int refineLimit) {
         UUID playerId = player.getUUID();
         List<Job> queue = state.queue(detail);
         double detailRadius = this.config.detailMaxRadiusChunks * 16.0 + 64.0;
+        if (ServerPerf.ON && state.inFlight(detail) >= limit && !queue.isEmpty()) {
+            (detail ? ServerPerf.STOP_DETAIL_LIMIT : ServerPerf.STOP_ROUGH_LIMIT).incrementAndGet();
+        }
         while (state.inFlight(detail) < limit && !queue.isEmpty()) {
             Identifier dimensionId = state.dimension == null ? null : state.dimension.identifier();
             int best = mostImportant(queue, player, detail,
                 detail && dimensionId != null ? pos -> this.virtualChunks.busy(dimensionId, pos) : pos -> false);
             if (best < 0) {
                 // Every waiting tile needs a region that is being made right now; the next one starts when it is done.
+                if (ServerPerf.ON) {
+                    ServerPerf.STOP_VIRTUAL_BUSY.incrementAndGet();
+                }
                 return;
             }
-            if (refineSlowly && !queue.get(best).hole() && state.inFlight(detail) > 0) {
+            if (!queue.get(best).hole() && state.inFlight(detail) >= refineLimit) {
+                if (ServerPerf.ON) {
+                    ServerPerf.STOP_REFINE_ONE.incrementAndGet();
+                }
                 return;
             }
             Job job = queue.get(best);
@@ -754,6 +791,9 @@ public final class TileServer {
                             if (job.detail()) {
                                 ServerPerf.DETAIL_CPU.add(ServerPerf.cpu() - cpu);
                                 ServerPerf.DETAIL_PAUSED.add(WorkThrottle.pausedNanos() - paused);
+                            } else {
+                                ServerPerf.ROUGH_CPU.add(ServerPerf.cpu() - cpu);
+                                ServerPerf.ROUGH_PAUSED.add(WorkThrottle.pausedNanos() - paused);
                             }
                         }
                     } catch (WorkThrottle.Cancelled e) {

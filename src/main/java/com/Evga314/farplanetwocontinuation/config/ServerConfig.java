@@ -78,10 +78,14 @@ public class ServerConfig {
         return FarPlaneConstants.ANDROID ? Mth.clamp(cores / 2, 1, 4) : Mth.clamp(cores * 3 / 8, 1, 4);
     }
 
-    /** Detailed tiles worked on at the same time while loading is not urgent (walking around), so frames stay smooth. */
+    /**
+     * Detailed tiles worked on at the same time while loading is not urgent (walking around). On phones one, so frames stay smooth on
+     * their few cores; on computers all of them, since the threads make room for late frames anyway (see WorkThrottle) and holding
+     * them back only left cores idle.
+     */
     public int resolvedCalmDetailThreads() {
         int all = this.resolvedDetailThreads();
-        return FarPlaneConstants.ANDROID ? 1 : Math.max(1, all / 2);
+        return FarPlaneConstants.ANDROID ? 1 : all;
     }
 
     public static ServerConfig load() {

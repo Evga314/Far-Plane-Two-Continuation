@@ -17,6 +17,20 @@ final class ServerPerf {
 
     static final Kind ROUGH = new Kind("rough tiles");
     static final Kind DETAIL = new Kind("detail tiles");
+    /** Processor time of rough tiles, against their time on the clock: the difference is waiting (locks, disk, pauses). */
+    static final Kind ROUGH_CPU = new Kind("rough cpu");
+    static final Kind ROUGH_PAUSED = new Kind("rough paused");
+    /** Why the server stopped handing out tiles to the threads, counted per stop, see TileServer#pump. */
+    static final AtomicLong STOP_ROUGH_LIMIT = new AtomicLong();
+    static final AtomicLong STOP_REFINE_ONE = new AtomicLong();
+    static final AtomicLong STOP_DETAIL_LIMIT = new AtomicLong();
+    static final AtomicLong STOP_VIRTUAL_BUSY = new AtomicLong();
+    /** Tiles in flight summed over the server ticks since the last line, and the ticks, for the average; and the limits. */
+    static final AtomicLong ROUGH_IN_FLIGHT = new AtomicLong();
+    static final AtomicLong DETAIL_IN_FLIGHT = new AtomicLong();
+    static final AtomicLong DETAIL_LIMIT = new AtomicLong();
+    static final AtomicLong IN_FLIGHT_TICKS = new AtomicLong();
+    private static long lastSummary = System.nanoTime();
     static final Kind DETAIL_LIVE = new Kind("detail live summaries");
     static final Kind DETAIL_SAVED = new Kind("detail saved summaries");
     static final Kind DETAIL_VIRTUAL = new Kind("detail virtual fetch");
@@ -75,10 +89,28 @@ final class ServerPerf {
         }
     }
 
+    /**
+     * How busy the threads were since the last line, and what held them back: the share of the time the tile threads of each kind ran
+     * tiles, the tiles in flight on average against how many threads there are, and how often handing out tiles stopped at each limit.
+     */
+    static void threads(int roughThreads, int detailThreads, int maxRoughInFlight) {
+        long now = System.nanoTime();
+        double window = Math.max(1L, now - lastSummary);
+        lastSummary = now;
+        long ticks = Math.max(1L, IN_FLIGHT_TICKS.getAndSet(0L));
+        LOGGER.info(String.format(Locale.ROOT,
+            "[FarPlane perf] server threads: rough busy %.0f%% of %d threads, in flight avg %.2f (limit %d) | detail busy %.0f%% of %d threads,"
+                + " in flight avg %.2f (limit avg %.2f) | stops: rough at limit %d, refining at its limit %d, detail at limit %d, waiting for a virtual area %d",
+            100.0 * ROUGH.windowNanos() / window / roughThreads, roughThreads, (double) ROUGH_IN_FLIGHT.getAndSet(0L) / ticks, maxRoughInFlight,
+            100.0 * DETAIL.windowNanos() / window / detailThreads, detailThreads, (double) DETAIL_IN_FLIGHT.getAndSet(0L) / ticks,
+            (double) DETAIL_LIMIT.getAndSet(0L) / ticks, STOP_ROUGH_LIMIT.getAndSet(0L), STOP_REFINE_ONE.getAndSet(0L),
+            STOP_DETAIL_LIMIT.getAndSet(0L), STOP_VIRTUAL_BUSY.getAndSet(0L)));
+    }
+
     static void summary(double serverTickMs, int roughQueued, int detailQueued) {
         StringBuilder line = new StringBuilder(256);
         boolean any = false;
-        for (Kind kind : new Kind[] {ROUGH, ROUGH_NEAR, ROUGH_ESTIMATED, ROUGH_EXACT, ICEBERGS, DETAIL, DETAIL_LIVE, DETAIL_SAVED, DETAIL_VIRTUAL, DETAIL_PREPARE, DETAIL_COLLECT, DETAIL_TRIM, DETAIL_BUILD, DETAIL_ENCODE, DETAIL_CPU, DETAIL_PAUSED, SAVED_CHUNKS, VIRTUAL_REGIONS}) {
+        for (Kind kind : new Kind[] {ROUGH, ROUGH_CPU, ROUGH_PAUSED, ROUGH_NEAR, ROUGH_ESTIMATED, ROUGH_EXACT, ICEBERGS, DETAIL, DETAIL_LIVE, DETAIL_SAVED, DETAIL_VIRTUAL, DETAIL_PREPARE, DETAIL_COLLECT, DETAIL_TRIM, DETAIL_BUILD, DETAIL_ENCODE, DETAIL_CPU, DETAIL_PAUSED, SAVED_CHUNKS, VIRTUAL_REGIONS}) {
             any |= kind.append(line);
         }
         line.append(" | surface searches ").append(SURFACE_SEARCHES.getAndSet(0L));
@@ -149,10 +181,18 @@ final class ServerPerf {
             this.name = name;
         }
 
+        /** Time of all runs since the last {@link #windowNanos}, for how busy the threads were. */
+        private final AtomicLong window = new AtomicLong();
+
         void add(long nanos) {
             this.count.incrementAndGet();
             this.nanos.addAndGet(nanos);
             this.max.accumulateAndGet(nanos, Math::max);
+            this.window.addAndGet(nanos);
+        }
+
+        long windowNanos() {
+            return this.window.getAndSet(0L);
         }
 
         boolean append(StringBuilder line) {

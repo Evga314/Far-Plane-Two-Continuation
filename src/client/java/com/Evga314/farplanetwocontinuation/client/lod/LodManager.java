@@ -728,6 +728,8 @@ public final class LodManager {
      */
     public void frameCheck(double camX, double camY, double camZ) {
         if (this.edgeMeshes.isEmpty()) {
+            // Nothing along the edge: what Sodium drew is not needed, and an old frame of it must not be taken for this one.
+            this.view.forgetFrame();
             return;
         }
         this.view.frameCamera(camX, camY, camZ);
@@ -740,7 +742,7 @@ public final class LodManager {
             if (mesh.vertices.isClosed()) {
                 continue;
             }
-            LodView.Coverage coverage = this.view.coverage(chunks[at], chunks[at + 1], chunks[at + 2], chunks[at + 3]);
+            LodView.Coverage coverage = this.view.coverage(chunks[at], chunks[at + 1], chunks[at + 2], chunks[at + 3], true);
             if (coverage.ordinal() == chunks[at + 4] && this.view.drawnSections == chunks[at + 5] && this.view.lowestSection == chunks[at + 6]) {
                 continue;
             }
@@ -806,10 +808,12 @@ public final class LodManager {
             int chunkX = baseX + chunk % side;
             int chunkZ = baseZ + chunk / side;
             if (nearVanilla) {
-                coverage[chunk] = this.view.coverage(chunkX, chunkZ, surfaces[chunk * 2], surfaces[chunk * 2 + 1]);
+                // Along the edge of what vanilla draws, by what Sodium drew in the last frame, as frameCheck asks it.
+                boolean edgeChunk = this.alongVanillaEdge(chunkX, chunkZ);
+                coverage[chunk] = this.view.coverage(chunkX, chunkZ, surfaces[chunk * 2], surfaces[chunk * 2 + 1], edgeChunk);
                 masks[chunk] = this.view.drawnSections;
                 lowest[chunk] = this.view.lowestSection;
-                if (record && this.alongVanillaEdge(chunkX, chunkZ)) {
+                if (record && edgeChunk) {
                     this.edgeMeshes.add(mesh);
                     this.edgeChunks.add(chunkX);
                     this.edgeChunks.add(chunkZ);

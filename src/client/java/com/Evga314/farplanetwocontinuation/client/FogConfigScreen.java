@@ -69,7 +69,8 @@ public class FogConfigScreen extends OptionsSubScreen {
             OptionInstance<Integer> mode = new OptionInstance<>(
                 PREFIX + "fog_mode",
                 value -> Tooltip.create(Component.translatable(PREFIX + "fog_mode." + value + ".tooltip")),
-                (caption, value) -> Options.genericValueLabel(caption, Component.translatable(PREFIX + "fog_mode." + value)),
+                // A switch puts its caption in front of the value itself.
+                (caption, value) -> Component.translatable(PREFIX + "fog_mode." + value),
                 new OptionInstance.Enum<>(List.of(ClientConfig.FOG_AUTO, ClientConfig.FOG_OWN, ClientConfig.FOG_OTHER, ClientConfig.FOG_OFF), Codec.INT),
                 config.fogMode,
                 value -> {
@@ -99,7 +100,7 @@ public class FogConfigScreen extends OptionsSubScreen {
             this.shape = new OptionInstance<>(
                 PREFIX + "fog_shape",
                 OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "fog_shape.tooltip")),
-                (caption, value) -> Options.genericValueLabel(caption, Component.translatable(PREFIX + "fog_shape." + value)),
+                (caption, value) -> Component.translatable(PREFIX + "fog_shape." + value),
                 new OptionInstance.Enum<>(List.of(0, 1), Codec.INT),
                 config.fogShape,
                 value -> config.fogShape = value

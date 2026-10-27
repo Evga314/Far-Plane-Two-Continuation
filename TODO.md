@@ -11,6 +11,7 @@
 - **Сейчас** - можно браться уже сейчас, ничего не мешает.
 - **Потом** - ждёт чего-то: другого пункта
 
+это приблизительный черновой список. некоторые пункты уже нактуальны или неверны. некоторых нету
 
 But... wait. I have an idea to add underground generation for the far terrain too. Just generate caves only if you are already underground, and only in about ~32 chunks around the player
 

@@ -551,7 +551,7 @@ public final class LodManager {
             // depth runs from -1 to 1 (OpenGL without clip control, as on phones through LTW): the far plane at infinity in vanilla's
             // depth buffer then leaves too little precision, and the LOD terrain and vanilla's blocks fought over it as the camera
             // turned.
-            LodRenderer.mainPassPrototype = this.config.newRenderer && !IrisCompat.shadersActive() && !DebugToggles.noMainPass
+            LodRenderer.mainPassPrototype = this.config.newRenderer && !IrisCompat.shadersActive() && !DebugToggles.noMainPass && !DebugToggles.surface
                 && RenderSystem.getDevice().getDeviceInfo().isZZeroToOne();
         }
         if (!this.isActive() || level == null) {

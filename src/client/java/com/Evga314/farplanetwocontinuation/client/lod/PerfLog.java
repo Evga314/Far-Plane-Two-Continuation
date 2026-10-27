@@ -345,6 +345,25 @@ public final class PerfLog {
         changedRefreshesMixed.incrementAndGet();
     }
 
+    private static final AtomicLong[] surface = new AtomicLong[7];
+
+    static {
+        for (int i = 0; i < surface.length; i++) {
+            surface[i] = new AtomicLong();
+        }
+    }
+
+    /** A rough tile's mesh for the new renderer, built beside the old one: its time, bytes, vertices, indices and the old one's bytes. */
+    public static void surfaceBuilt(long nanos, long bytes, int vertices, int indices, long oldBytes) {
+        surface[0].incrementAndGet();
+        surface[1].addAndGet(nanos);
+        surface[2].accumulateAndGet(nanos, Math::max);
+        surface[3].addAndGet(bytes);
+        surface[4].addAndGet(vertices);
+        surface[5].addAndGet(indices);
+        surface[6].addAndGet(oldBytes);
+    }
+
     public static void meshBuilt(boolean detail, long nanos, long pausedNanos) {
         int index = detail ? 1 : 0;
         meshPausedNs[index].addAndGet(pausedNanos);
@@ -501,6 +520,12 @@ public final class PerfLog {
             long paused = meshPausedNs[index].getAndSet(0L);
             line.append(String.format(Locale.ROOT, " | %s meshes %d, avg %.1f max %.1f ms, paused avg %.1f ms",
                     meshKinds[index], built, built == 0 ? 0.0 : nanos / 1e6 / built, max / 1e6, built == 0 ? 0.0 : paused / 1e6 / built));
+        }
+        long surfaces = surface[0].getAndSet(0L);
+        if (surfaces > 0) {
+            line.append(String.format(Locale.ROOT, " | surface meshes %d, avg %.2f max %.1f ms, avg %d vertices %d indices drawn, own %.1f KB (old %.1f KB)",
+                surfaces, surface[1].getAndSet(0L) / 1e6 / surfaces, surface[2].getAndSet(0L) / 1e6, surface[4].getAndSet(0L) / surfaces,
+                surface[5].getAndSet(0L) / surfaces, surface[3].getAndSet(0L) / 1024.0 / surfaces, surface[6].getAndSet(0L) / 1024.0 / surfaces));
         }
         line.append(String.format(Locale.ROOT, " | changed blocks: tiles refreshed %d (with changes under vanilla too %d), put off under vanilla %d",
             changedRefreshes.getAndSet(0L), changedRefreshesMixed.getAndSet(0L), changedRefreshesPutOff.getAndSet(0L)));

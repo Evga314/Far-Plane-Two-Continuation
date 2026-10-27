@@ -38,6 +38,11 @@ final class DebugToggles {
     /** The LOD terrain keeps its own pass instead of being drawn in vanilla's main pass, see LodRenderer.mainPassPrototype. */
     static volatile boolean noMainPass;
 
+    /** Builds the new renderer's mesh beside the old one and logs what it costs, see SurfaceMeshBuilder. */
+    static volatile boolean surfaceMesh;
+    /** Draws the rough tiles with the new renderer's mesh and pass (stage 3 of the rewrite), see OwnPassOutput. */
+    static volatile boolean surface;
+
     private static long checkedAt;
 
     private DebugToggles() {
@@ -66,6 +71,8 @@ final class DebugToggles {
         changed |= markBlocked != (markBlocked = check(config, "farplane-debug-mark-blocked"));
         changed |= markVanillaChunks != (markVanillaChunks = check(config, "farplane-debug-mark-vanilla-chunks"));
         changed |= noPatch != (noPatch = check(config, "farplane-debug-no-patch"));
+        changed |= surfaceMesh != (surfaceMesh = check(config, "farplane-debug-surface-mesh"));
+        changed |= surface != (surface = check(config, "farplane-debug-surface"));
         // These two need no tiles built again.
         boolean frameMask = noFrameMask != (noFrameMask = check(config, "farplane-debug-no-frame-mask"));
         boolean mainPass = noMainPass != (noMainPass = check(config, "farplane-debug-no-main-pass"));
@@ -73,8 +80,8 @@ final class DebugToggles {
             LOGGER.info("[FarPlane debug] chunks along vanilla's edge asked every frame {}, LOD terrain in vanilla's main pass {}", !noFrameMask, !noMainPass);
         }
         if (changed) {
-            LOGGER.info("[FarPlane debug] tile edges marked {}, coast borders {}, forest edges {}, biome borders {}, snow line {}, coast smoothing {}, old distances {}, old ice {}, blocked marked {}, vanilla chunks marked {}, patch {}",
-                tileEdges, !noCoastBorders, !noForestEdges, !noBiomeBorders, !noSnowLine, !noCoastSmoothing, oldDistances, oldIce, markBlocked, markVanillaChunks, !noPatch);
+            LOGGER.info("[FarPlane debug] tile edges marked {}, coast borders {}, forest edges {}, biome borders {}, snow line {}, coast smoothing {}, old distances {}, old ice {}, blocked marked {}, vanilla chunks marked {}, patch {}, surface mesh {}, new renderer {}",
+                tileEdges, !noCoastBorders, !noForestEdges, !noBiomeBorders, !noSnowLine, !noCoastSmoothing, oldDistances, oldIce, markBlocked, markVanillaChunks, !noPatch, surfaceMesh, surface);
         }
         return changed;
     }

@@ -373,7 +373,9 @@ void main() {
     // beyond it, so there is no second edge where the seabed suddenly stops showing.
     if (TextureMat[2][0] > 0.0) {
         float edge = smoothstep(TextureMat[2][0] * WATER_FADE_START, TextureMat[2][0], horizontal);
-        surface = mix(surface, vec4(vertexColor.rgb * spriteAverage() * ROUGH_WATER_SHADE, 1.0), edge);
+        // The new renderer's rough water is translucent too (TextureMat[2][1] below 0): only the color turns into it.
+        float roughAlpha = TextureMat[2][1] < 0.0 ? surface.a : 1.0;
+        surface = mix(surface, vec4(vertexColor.rgb * spriteAverage() * ROUGH_WATER_SHADE, roughAlpha), edge);
     }
     // In the fading edge the water has already turned into the rough water beyond it: it stays, so the seabed fading out under it
     // is not seen bare, lighter than both.

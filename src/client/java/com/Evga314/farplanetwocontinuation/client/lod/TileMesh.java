@@ -42,6 +42,8 @@ final class TileMesh implements AutoCloseable {
     final boolean hasWater;
     /** Has faces whose texture has gaps, which the shader drops texel by texel. */
     final boolean hasCutout;
+    /** Rough tiles of the new renderer: where their parts lie in {@link #vertices}, see OwnPassOutput. Null for the old mesh. */
+    final com.Evga314.farplanetwocontinuation.client.lod.surface.@Nullable SurfaceTile surface;
     /** Rough tiles: lowest ground of each part of the tile, for {@link Horizon}. */
     final float @Nullable [] partLows;
     /** Hidden behind terrain this tick, see {@link Horizon}. */
@@ -103,6 +105,7 @@ final class TileMesh implements AutoCloseable {
         this.textured = built.textured();
         this.hasWater = built.hasWater();
         this.hasCutout = built.hasCutout();
+        this.surface = built.surface();
         this.partLows = !built.detail() && built.heights() != null ? Horizon.partLows(built.heights()) : null;
     }
 

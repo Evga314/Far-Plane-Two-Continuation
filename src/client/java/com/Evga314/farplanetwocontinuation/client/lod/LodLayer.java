@@ -1,5 +1,7 @@
 package com.Evga314.farplanetwocontinuation.client.lod;
 
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.WorkThrottle;
 import com.Evga314.farplanetwocontinuation.net.FarPlanePayloads;
@@ -81,7 +83,8 @@ abstract class LodLayer {
         this.name = name;
         this.detail = "detail".equals(name);
         this.meshExecutor = meshExecutor;
-        this.arena = new VertexArena(name, this.detail ? DETAIL_BLOCK_BYTES : ROUGH_BLOCK_BYTES);
+        // Rough tiles of the new renderer keep their own indices next to their vertices, see SurfaceTile.
+        this.arena = new VertexArena(name, this.detail ? DETAIL_BLOCK_BYTES : ROUGH_BLOCK_BYTES, this.detail ? 0 : GpuBuffer.USAGE_INDEX);
     }
 
     /**

@@ -64,6 +64,22 @@ dependencies {
     // Now sodium is required
     clientCompileOnly "maven.modrinth:sodium:${project.sodium_version}"
     clientRuntimeOnly "maven.modrinth:sodium:${project.sodium_version}"
+
+    // Unit tests of the code that needs no game, such as the new renderer's mesher.
+    testImplementation platform("org.junit:junit-bom:5.11.4")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+sourceSets {
+    test {
+        compileClasspath += sourceSets.client.output + sourceSets.client.compileClasspath
+        runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
+    }
+}
+
+test {
+    useJUnitPlatform()
 }
 
 processResources {
@@ -127,5 +143,12 @@ publishing {
         // Notice: This block does NOT have the same function as the block in the top level.
         // The repositories here will be used for publishing your artifact, not for
         // retrieving dependencies.
+    }
+}
+
+// ./gradlew runClientGameTest -Pvulkan runs the game tests on Vulkan, as most players have it, instead of OpenGL.
+if (project.hasProperty('vulkan')) {
+    tasks.matching { it.name == 'runClientGameTest' }.configureEach {
+        args '--graphicsBackend', 'vulkan'
     }
 }

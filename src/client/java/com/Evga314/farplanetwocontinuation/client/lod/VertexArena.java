@@ -27,14 +27,17 @@ final class VertexArena implements AutoCloseable {
 
     private final String name;
     private final int blockBytes;
+    private final @GpuBuffer.Usage int usage;
     private final List<Block> blocks = new ArrayList<>();
     private long lastGrow;
     /** Bytes free in all blocks. */
     private long free;
 
-    VertexArena(String name, int blockBytes) {
+    /** @param usage what else the buffers are used for besides vertices, such as indices */
+    VertexArena(String name, int blockBytes, @GpuBuffer.Usage int usage) {
         this.name = name;
         this.blockBytes = blockBytes;
+        this.usage = GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST | usage;
     }
 
     /** Makes blocks until there are {@code count}; meant for while the world loads, when a stalled frame is not seen. */
@@ -83,7 +86,7 @@ final class VertexArena implements AutoCloseable {
         if (size > this.blockBytes) {
             long start = PerfLog.ON ? System.nanoTime() : 0L;
             GpuBuffer own = RenderSystem.getDevice().createBuffer(
-                () -> "FarPlane " + this.name + " large tile", GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST, size
+                () -> "FarPlane " + this.name + " large tile", this.usage, size
             );
             if (PerfLog.ON) {
                 PerfLog.bufferCreated(System.nanoTime() - start, size);
@@ -120,7 +123,7 @@ final class VertexArena implements AutoCloseable {
         long start = PerfLog.ON ? System.nanoTime() : 0L;
         int index = this.blocks.size();
         GpuBuffer buffer = RenderSystem.getDevice().createBuffer(
-            () -> "FarPlane " + this.name + " tiles #" + index, GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_COPY_DST, this.blockBytes
+            () -> "FarPlane " + this.name + " tiles #" + index, this.usage, this.blockBytes
         );
         if (PerfLog.ON) {
             PerfLog.bufferCreated(System.nanoTime() - start, this.blockBytes);

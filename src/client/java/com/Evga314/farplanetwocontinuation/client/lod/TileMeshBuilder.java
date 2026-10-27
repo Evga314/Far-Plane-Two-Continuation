@@ -2,6 +2,12 @@ package com.Evga314.farplanetwocontinuation.client.lod;
 
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.tile.TileData;
+import com.Evga314.farplanetwocontinuation.client.lod.surface.LodVertex;
+import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceFields;
+import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceIndices;
+import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceMesh;
+import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceMesher;
+import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceTile;
 import com.Evga314.farplanetwocontinuation.tile.TilePos;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -396,7 +402,9 @@ public final class TileMeshBuilder {
         landBesideWater(colors, waterColors, hasLand);
         short[] heights = data.heights.clone();
         boolean[] coastal = Scratch.booleans();
-        float[] coast = shapeCoasts(data, tops, heights, hasLand, alphas, wet, spacing, seaLevel, coastal, smoothing.coasts());
+        // The level of the water next to every sample, NaN where there is none.
+        float[] levels = Scratch.floats();
+        float[] coast = shapeCoasts(data, tops, heights, hasLand, alphas, wet, spacing, seaLevel, coastal, levels, smoothing.coasts());
         if (floating) {
             // There are no coasts between the islands: the value carries the signed distance to the island edge instead, and the
             // shader cuts the surface where it crosses zero, see its FLOATING branches.
@@ -439,6 +447,15 @@ public final class TileMeshBuilder {
                     }
                 }
             }
+        }
+        SurfaceMesh surface = null;
+        if (DebugToggles.surfaceMesh || DebugToggles.surface) {
+            // The new renderer's mesh (see SurfaceMesher): measured beside the old one, or drawn instead of it.
+            long start = System.nanoTime();
+            surface = surfaceMesh(data, spacing, tileX, tileZ, floating, tops, levels, coast, coastal, icy, hasLand, alphas, slopes,
+                colors, thirdColors, thirdValues, softness, waterColors, waterThird, waterSplit);
+            PerfLog.surfaceBuilt(System.nanoTime() - start, surface.bytes(), surface.vertexCount(), surface.indexCount(),
+                (long) (floating ? VERTEX_COUNT + OUT * OUT : VERTEX_COUNT) * GeneralMeshFactory.ROUGH_VERTEX_SIZE);
         }
         minY = Float.MAX_VALUE;
         maxY = -Float.MAX_VALUE;
@@ -492,7 +509,105 @@ public final class TileMeshBuilder {
         }
         buffer.flip();
         int indexCount = floating ? FLOATING_INDEX_COUNT : INDEX_COUNT;
-        return new GeneralMeshFactory.Built(key, epoch, buffer, minY - deepest, maxY, minY, tileHeights, indexCount, false, 0L, true, null, null, false, false, null, false);
+        if (DebugToggles.surface && surface != null) {
+            SurfaceTile tile = surface.tile();
+            return new GeneralMeshFactory.Built(key, epoch, surface.combined(), Math.min(minY - deepest, surface.baseY()), maxY, minY, tileHeights,
+                surface.indexCount(), false, 0L, true, null, null, false, tile.hasWater(), null, false, tile);
+        }
+        return new GeneralMeshFactory.Built(key, epoch, buffer, minY - deepest, maxY, minY, tileHeights, indexCount, false, 0L, true, null, null, false, false, null, false, null);
+    }
+
+    /** The depth of water whose depth the server did not send, in blocks. */
+    private static final int UNKNOWN_WATER_DEPTH = 4;
+    /** Ground steeper than this is bare rock for shader packs. */
+    private static final float ROCK_SLOPE = 1.2F;
+
+    /**
+     * Hands the shaped samples of the tile over to {@link SurfaceMesher} and builds the new mesh with them. Water next to land keeps
+     * the depth the coast was shaped with, so the ground goes under the water along the smoothed coast; farther out the seabed lies
+     * as deep as the server found it.
+     */
+    private static SurfaceMesh surfaceMesh(
+        Grid data, int spacing, long tileX, long tileZ, boolean floating, float[] tops, float[] levels, float[] coast, boolean[] coastal,
+        boolean[] icy, boolean[] hasLand, int[] alphas, float[] slopes, int[] colors, int[] beyond, float[] split, int[] softness,
+        int[] waterColors, int[] waterBeyond, float[] waterSplit
+    ) {
+        SurfaceFields fields = SurfaceFields.forThread();
+        fields.spacing = spacing;
+        fields.floating = floating;
+        for (int i = 0; i < OUT; i++) {
+            fields.columns[i] = GeneralMeshFactory.localCoordinate(tileX, i, spacing) / spacing * LodVertex.XZ_UNITS;
+            fields.rows[i] = GeneralMeshFactory.localCoordinate(tileZ, i, spacing) / spacing * LodVertex.XZ_UNITS;
+        }
+        boolean coarse = data.subWater != null;
+        // The ground on the whole grid first: the slopes at the tile's edge need the margin's.
+        float[] ground = Scratch.floats();
+        float[] waterLevels = Scratch.floats();
+        for (int index = 0; index < GRID_VERTICES; index++) {
+            float level = floating ? Float.NaN : levels[index];
+            // Coarse water lies at the sea level, under vanilla's water like the fine one.
+            if (coarse && !Float.isNaN(level)) {
+                level -= WATER_UNDER_VANILLA;
+            }
+            waterLevels[index] = level;
+            boolean water = !floating && !hasLand[index] && alphas[index] != 0 && !Float.isNaN(level);
+            int depth = data.waterDepths[index] & 0xFF;
+            ground[index] = water && !coastal[index] ? level - (depth > 0 ? depth : UNKNOWN_WATER_DEPTH) : tops[index];
+        }
+        for (int z = 0; z < OUT; z++) {
+            for (int x = 0; x < OUT; x++) {
+                int index = inGrid(x, z);
+                int sample = SurfaceFields.at(x, z);
+                int flags = data.flags[index];
+                boolean water = !floating && !hasLand[index] && alphas[index] != 0 && !Float.isNaN(waterLevels[index]);
+                fields.ground[sample] = ground[index];
+                fields.waterLevel[sample] = waterLevels[index];
+                fields.water[sample] = water;
+                fields.opaque[sample] = icy[index];
+                fields.slopeX[sample] = (ground[index + 1] - ground[index - 1]) / (2.0F * spacing);
+                fields.slopeZ[sample] = (ground[index + S] - ground[index - S]) / (2.0F * spacing);
+                fields.canopy[sample] = alphas[index] == 0 ? 0.0F : (255 - alphas[index]) / CANOPY_UNITS;
+                int material;
+                if (water) {
+                    material = LodVertex.MATERIAL_SAND;
+                } else if ((flags & TileData.FLAG_LAVA) != 0) {
+                    material = LodVertex.MATERIAL_LAVA;
+                } else if ((flags & TileData.FLAG_ICEBERG) != 0) {
+                    material = LodVertex.MATERIAL_SNOW;
+                } else if (alphas[index] != 0 && alphas[index] < 255) {
+                    material = LodVertex.MATERIAL_LEAVES;
+                } else if (slopes[index] > ROCK_SLOPE) {
+                    material = LodVertex.MATERIAL_STONE;
+                } else {
+                    material = LodVertex.MATERIAL_GRASS;
+                }
+                fields.material[sample] = (byte) material;
+                fields.color[sample] = colors[index];
+                fields.beyond[sample] = beyond[index];
+                fields.split[sample] = split[index];
+                fields.softness[sample] = (byte) Mth.clamp(softness[index], 0, GeneralMeshFactory.MAX_SOFTNESS);
+                fields.waterColor[sample] = waterColors[index];
+                fields.waterBeyond[sample] = waterBeyond[index];
+                fields.waterSplit[sample] = waterSplit[index];
+                fields.edgeDistance[sample] = floating ? coast[index] : 0.0F;
+                fields.skirtDepth[sample] = 0.0F;
+            }
+        }
+        if (!floating) {
+            // As the old skirts (see buildOnGrid): down from the lowest ground along the edge nearby, the seabed counting as ground.
+            float baseDepth = Mth.clamp(spacing, SKIRT_MIN_ROOM, SKIRT_MAX_ROOM);
+            for (int edge = 0; edge < 4; edge++) {
+                for (int i = 0; i < OUT; i++) {
+                    int sample = SurfaceIndices.edgeSample(edge, i);
+                    float lowest = fields.ground[sample];
+                    for (int j = Math.max(0, i - SKIRT_REACH); j <= Math.min(OUT_C, i + SKIRT_REACH); j++) {
+                        lowest = Math.min(lowest, fields.ground[SurfaceIndices.edgeSample(edge, j)]);
+                    }
+                    fields.skirtDepth[sample] = Math.min(baseDepth + fields.ground[sample] - lowest, MAX_SKIRT_DEPTH);
+                }
+            }
+        }
+        return SurfaceMesher.build(fields);
     }
 
     /** The sample of the grid with the margin at a sample of the tile. */
@@ -633,7 +748,7 @@ public final class TileMeshBuilder {
      */
     private static float[] shapeCoasts(
         Grid data, float[] tops, short[] heights, boolean[] hasLand, int[] alphas, float[] wet, int spacing, int seaLevel,
-        boolean[] coastal, int smoothing
+        boolean[] coastal, float[] levels, int smoothing
     ) {
         boolean[] present = Scratch.booleans();
         for (int index = 0; index < GRID_VERTICES; index++) {
@@ -656,7 +771,6 @@ public final class TileMeshBuilder {
         }
         float reach = Mth.clamp(spacing * 0.5F, COAST_DIP_MIN, COAST_DIP_MAX);
         float give = Mth.clamp(spacing / 8.0F, COAST_GIVE_MIN, COAST_GIVE_MAX) / reach;
-        float[] levels = Scratch.floats();
         float[] low = Scratch.floats();
         float[] high = Scratch.floats();
         boolean[] water = Scratch.booleans();

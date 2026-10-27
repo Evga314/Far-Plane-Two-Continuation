@@ -1,6 +1,7 @@
 package com.Evga314.farplanetwocontinuation.mixin.client;
 
 import com.Evga314.farplanetwocontinuation.client.FarplanetwocontinuationClient;
+import com.Evga314.farplanetwocontinuation.client.lod.IrisGlue;
 import com.Evga314.farplanetwocontinuation.client.lod.LodRenderer;
 import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
@@ -52,7 +53,7 @@ abstract class LevelRendererMixin {
         if (!renderer.shouldRender(cameraState)) {
             return;
         }
-        if (LodRenderer.mainPassPrototype) {
+        if (LodRenderer.mainPassPrototype || LodRenderer.irisPass) {
             // Prototype: buffers are written now, the tiles are drawn inside vanilla's main pass, see farplane$lodAfterOpaqueTerrain.
             renderer.prepareMainPass(cameraState);
             return;
@@ -86,7 +87,7 @@ abstract class LevelRendererMixin {
     ) {
         LodRenderer renderer = FarplanetwocontinuationClient.renderer();
         CameraRenderState camera = this.levelRenderState.cameraRenderState;
-        if (renderer == null || !LodRenderer.mainPassPrototype) {
+        if (renderer == null || !LodRenderer.mainPassPrototype && !LodRenderer.irisPass) {
             return;
         }
         renderer.renderInMainPass(renderPass, camera);
@@ -103,8 +104,10 @@ abstract class LevelRendererMixin {
         com.mojang.renderpearl.api.commands.RenderPass renderPass,
         CallbackInfo ci
     ) {
+        // With a shader pack its DH depth is cleared here when the LOD terrain was not drawn, see IrisOutput.
+        IrisGlue.endSolid();
         LodRenderer renderer = FarplanetwocontinuationClient.renderer();
-        if (renderer == null || !LodRenderer.mainPassPrototype) {
+        if (renderer == null || !LodRenderer.mainPassPrototype && !LodRenderer.irisPass) {
             return;
         }
         renderer.renderWaterInMainPass(renderPass);

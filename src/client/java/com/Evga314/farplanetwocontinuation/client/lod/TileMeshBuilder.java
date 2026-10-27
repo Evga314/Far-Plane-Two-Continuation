@@ -3,6 +3,7 @@ package com.Evga314.farplanetwocontinuation.client.lod;
 import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.tile.TileData;
 import com.Evga314.farplanetwocontinuation.client.lod.surface.LodVertex;
+import com.Evga314.farplanetwocontinuation.client.lod.surface.PackMesher;
 import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceFields;
 import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceIndices;
 import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceMesh;
@@ -454,6 +455,14 @@ public final class TileMeshBuilder {
             long start = System.nanoTime();
             surface = surfaceMesh(data, spacing, tileX, tileZ, floating, tops, levels, coast, coastal, icy, hasLand, alphas, slopes,
                 colors, thirdColors, thirdValues, softness, waterColors, waterThird, waterSplit);
+            if (IrisGlue.packMeshes) {
+                // For the shader pack's programs, with the borders cut in, see PackMesher; left as it is in the rare case it cannot be.
+                SurfaceMesh pack = PackMesher.build(surface, surface.sharedGround() ? SurfaceIndices.ground(surface.groups()).indices() : surface.indices(),
+                    spacing, IrisGlue.softBorders);
+                if (pack != null) {
+                    surface = pack;
+                }
+            }
             PerfLog.surfaceBuilt(System.nanoTime() - start, surface.bytes(), surface.vertexCount(), surface.indexCount(),
                 (long) (floating ? VERTEX_COUNT + OUT * OUT : VERTEX_COUNT) * GeneralMeshFactory.ROUGH_VERTEX_SIZE);
         }

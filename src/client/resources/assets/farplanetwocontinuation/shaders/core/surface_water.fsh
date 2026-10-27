@@ -16,6 +16,6 @@ layout(location = 0) out vec4 fragColor;
 // The water at its level, over the seabed: as opaque as its depth makes it (see SurfaceMesher), its borders between waters of other
 // temperatures as soft as the settings ask.
 void main() {
-    vec3 color = beyondBorder(vertexColor.rgb, secondColor, Params.y);
+    vec3 color = mix(beyondBorder(vertexColor.rgb, secondColor, Params.y), TileTint.rgb, TileTint.a);
     fragColor = vec4(lodFog(color, relativePosition), vertexColor.a);
 }

@@ -64,6 +64,12 @@ dependencies {
     // Now sodium is required
     clientCompileOnly "maven.modrinth:sodium:${project.sodium_version}"
     clientRuntimeOnly "maven.modrinth:sodium:${project.sodium_version}"
+    // Optional: shader packs draw the LOD terrain with their Distant Horizons programs (see IrisGlue). Never bundled; -Piris_test
+    // also runs the game with it, for tests with a pack.
+    clientCompileOnly "maven.modrinth:iris:${project.iris_version}"
+    if (project.hasProperty('iris_test')) {
+        clientRuntimeOnly "maven.modrinth:iris:${project.iris_version}"
+    }
 
     // Unit tests of the code that needs no game, such as the new renderer's mesher.
     testImplementation platform("org.junit:junit-bom:5.11.4")

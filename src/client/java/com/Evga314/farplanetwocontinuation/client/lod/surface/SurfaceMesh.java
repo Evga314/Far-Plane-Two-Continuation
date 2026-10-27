@@ -13,10 +13,11 @@ import java.nio.ByteBuffer;
  * @param indices      the tile's own triangles, unsigned shorts
  * @param groundOffsets the first index of every chunk column's ground (row by row from the north-west), and after the last its end
  * @param waterOffsets the same for the water, in {@link #indices}
+ * @param pack         whether the vertices are {@link PackMesher}'s, for shader packs, instead of {@link LodVertex}es
  */
 public record SurfaceMesh(
     ByteBuffer vertices, int vertexCount, float baseY, int groups, boolean sharedGround, ByteBuffer indices, int[] groundOffsets,
-    int[] waterOffsets
+    int[] waterOffsets, boolean pack
 ) {
     /** Indices drawn for the whole tile. */
     public int indexCount() {
@@ -32,7 +33,7 @@ public record SurfaceMesh(
     }
 
     public SurfaceTile tile() {
-        return new SurfaceTile(this.groups, this.sharedGround, this.groundOffsets, this.waterOffsets, this.vertices.remaining(), this.baseY);
+        return new SurfaceTile(this.groups, this.sharedGround, this.groundOffsets, this.waterOffsets, this.vertices.remaining(), this.baseY, this.pack);
     }
 
     /** Bytes the tile takes on the GPU itself, without the shared triangles. */

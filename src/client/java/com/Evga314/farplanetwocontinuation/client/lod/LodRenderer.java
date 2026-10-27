@@ -488,11 +488,15 @@ public final class LodRenderer {
 
     public LodRenderer(LodManager manager) {
         this.manager = manager;
-        this.surfaceOutput = new OwnPassOutput(manager);
+        this.drawList = new FrameDrawList(manager);
+        this.ownOutput = new OwnPassOutput(this.drawList, this::compiledPipeline);
+        this.vanillaOutput = new VanillaPassOutput(this.drawList, this::compiledPipeline);
     }
 
-    /** The rough tiles of the new mesh, see {@link OwnPassOutput}. */
-    private final OwnPassOutput surfaceOutput;
+    /** The rough tiles of the new mesh: what is drawn of them this frame, and the two ways of drawing it, see FrameDrawList. */
+    private final FrameDrawList drawList;
+    private final OwnPassOutput ownOutput;
+    private final VanillaPassOutput vanillaOutput;
 
     /** Projection actually used for the level this frame, including view bobbing and nausea distortion. */
     public void captureLevelProjection(Matrix4f projection) {
@@ -517,6 +521,12 @@ public final class LodRenderer {
      * plane at infinity (see CameraMixin and LevelRendererMixin). Off by default; the debug build and the tests turn it on.
      */
     public static volatile boolean mainPassPrototype;
+
+    /**
+     * An Iris shader pack draws the rough terrain with its DH programs (see IrisOutput), inside vanilla's main pass as the prototype
+     * above, which it is not: vanilla's far plane stays.
+     */
+    public static volatile boolean irisPass;
 
     /**
      * Where Sodium stops looking for sections behind the fog: the nearer end of the fog this frame, infinite without fog. Set by LodFog
@@ -648,8 +658,8 @@ public final class LodRenderer {
         LodFog lodFog = this.lodFog;
         lodFog.compute(this.manager.config().distant(), dimension, camera.fogType, vision, minecraft.options.getEffectiveRenderDistance(), this.manager.activeLodDistance());
         // Tiles all in fog are left out where what is behind them comes out in the fog color too: the sky in a fluid, or the bottom of
-        // the world, drawn with the same fog.
-        boolean fogCulls = camera.fogType != FogType.NONE || dimension == DimensionKind.OVERWORLD && !DebugToggles.noPatch;
+        // the world, drawn with the same fog. Not with a shader pack, whose fog is its own.
+        boolean fogCulls = (camera.fogType != FogType.NONE || dimension == DimensionKind.OVERWORLD && !DebugToggles.noPatch) && !irisPass;
         // Under water with its fog off, the view ends at a wall at the edge of the detailed tiles (see WALL_PIPELINE); rough tiles all
         // beyond it are not drawn. With the fog on it hides that edge long before, and there is no wall.
         float wallRadius = 0.0F;
@@ -847,10 +857,17 @@ public final class LodRenderer {
         GpuBufferSlice[] transformSlices = frame.write();
         Matrix4f vanillaProjection = this.bobbedProjection != null ? this.bobbedProjection : camera.projectionMatrix;
         // The tiles take their light from vanilla's lightmap alone, as the old ones (UNLIT); the modulator is for the patches.
-        this.surfaceOutput.prepare(this.visible, camX, camY, camZ, camera.viewRotationMatrix, vanillaProjection, zeroToOne, UNLIT, hasSky,
+        this.drawList.prepare(this.visible, camX, camY, camZ, camera.viewRotationMatrix, vanillaProjection, zeroToOne, UNLIT, hasSky,
             NO_SKY_FOG_RED, NO_SKY_FOG_GREEN, NO_SKY_FOG_BLUE, canopyStart, waterBlur);
         if (PerfLog.ON) {
             phase = PerfLog.renderPhase(3, phase);
+        }
+        if (inMain && irisPass) {
+            // The shader pack's programs draw the rough terrain; the detailed tiles are not drawn with a pack until they take the new
+            // mesh too (stage 7 of the rewrite), nor the water yet.
+            this.pendingDraw = pass -> IrisGlue.drawTerrain(this.drawList);
+            this.pendingWater = null;
+            return;
         }
 
         if (this.projectionBuffer == null) {
@@ -900,7 +917,11 @@ public final class LodRenderer {
                 );
                 PerfLog.pass(0);
                 this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, rough);
-                this.surfaceOutput.drawGround(pass, this.compiledPipeline(OwnPassOutput.GROUND));
+                if (inMain) {
+                    this.vanillaOutput.drawGround(pass);
+                } else {
+                    this.ownOutput.drawGround(pass);
+                }
                 if (vanillaWallPipeline != null && vanillaWallVertices != null) {
                     pass.setPipeline(vanillaWallPipeline);
                     pass.setIndexBuffer(quadIndices, IndexType.INT);
@@ -945,12 +966,16 @@ public final class LodRenderer {
                 }
         };
         CompiledRenderPipeline waterPipeline = waterTiles ? this.compiledPipeline(DETAIL_WATER_PIPELINE) : null;
-        CompiledRenderPipeline surfaceWater = this.surfaceOutput.hasTiles() ? this.compiledPipeline(OwnPassOutput.WATER) : null;
+        boolean surfaceWater = this.drawList.hasTiles();
         java.util.function.Consumer<RenderPass> drawWater = pass -> {
-            if (surfaceWater != null) {
+            if (surfaceWater) {
                 // The rough water before the detailed tiles' nearer water, which blends over it.
                 pass.setUniform("Fog", fogSlice);
-                this.surfaceOutput.drawWater(pass, surfaceWater);
+                if (inMain) {
+                    this.vanillaOutput.drawWater(pass);
+                } else {
+                    this.ownOutput.drawWater(pass);
+                }
             }
             if (waterPipeline != null) {
                 long waterStart = PerfLog.ON ? System.nanoTime() : 0L;
@@ -1054,7 +1079,7 @@ public final class LodRenderer {
             );
             PerfLog.pass(5);
             this.drawAll(pass, this.depthTiles, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, pipelines);
-            this.surfaceOutput.drawDepth(pass, this.compiledPipeline(OwnPassOutput.DEPTH), camera.depthFar);
+            this.ownOutput.drawDepth(pass, camera.depthFar);
         }
     }
 
@@ -1241,7 +1266,7 @@ public final class LodRenderer {
             int i = pipelines.waterOnly() ? count - 1 - n : n;
             TileMesh mesh = meshes.get(i);
             if (mesh.surface != null) {
-                // Drawn by OwnPassOutput.
+                // Drawn by OwnPassOutput or VanillaPassOutput.
                 continue;
             }
             int kind = drawKind(mesh);
@@ -1653,7 +1678,7 @@ public final class LodRenderer {
     private final VanillaWall vanillaWall = new VanillaWall();
 
     public void close() {
-        this.surfaceOutput.close();
+        this.drawList.close();
         this.vanillaWall.close();
         this.lodFog.close();
         if (this.atlasSampler != null) {

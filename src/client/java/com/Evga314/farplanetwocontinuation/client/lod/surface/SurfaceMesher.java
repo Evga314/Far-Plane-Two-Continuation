@@ -102,7 +102,7 @@ public final class SurfaceMesher {
             indices.putShort((short) work.indices[i]);
         }
         indices.flip();
-        return new SurfaceMesh(vertices, work.vertexCount, baseY, groups, !fields.floating, indices, groundOffsets, waterOffsets);
+        return new SurfaceMesh(vertices, work.vertexCount, baseY, groups, !fields.floating, indices, groundOffsets, waterOffsets, false);
     }
 
     /** A block under the lowest point of the mesh, the bottoms of the skirts and the undersides with it. */

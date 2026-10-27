@@ -1,0 +1,16 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.Evga314.farplanetwocontinuation.mixin.iris",
+  "plugin": "com.Evga314.farplanetwocontinuation.client.IrisMixinPlugin",
+  "compatibilityLevel": "JAVA_25",
+  "mixinextras": {"minVersion": "0.5.0"},
+  "client": [
+    "DHCompatMixin",
+    "IrisLodRenderProgramAccessor",
+    "StandardMacrosMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

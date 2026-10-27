@@ -51,6 +51,7 @@ public class LodConfigScreen extends OptionsSubScreen {
         this.list.addBig(Button.builder(Component.translatable(PREFIX + "fog_settings"), button -> this.open(new DimensionChoiceScreen(
             this, Component.translatable(PREFIX + "fog.title"), FogConfigScreen::new
         ))).build());
+        this.list.addBig(Button.builder(Component.translatable(PREFIX + "shader_settings"), button -> this.open(new ShaderConfigScreen(this))).build());
         this.list.addBig(Button.builder(Component.translatable(PREFIX + "other_settings"), button -> this.open(new OtherConfigScreen(this))).build());
     }
 

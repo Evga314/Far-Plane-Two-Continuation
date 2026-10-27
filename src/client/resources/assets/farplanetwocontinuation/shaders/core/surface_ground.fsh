@@ -16,5 +16,6 @@ layout(location = 0) out vec4 fragColor;
 // The ground: land, and under the water the seabed. Nothing is dropped, so the GPU rejects hidden fragments before shading them.
 void main() {
     vec3 color = beyondBorder(vertexColor.rgb, secondColor, softness) * seabedShade(waterLevel - relativePosition.y);
+    color = mix(color, TileTint.rgb, TileTint.a);
     fragColor = vec4(lodFog(color, relativePosition), 1.0);
 }

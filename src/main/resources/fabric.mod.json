@@ -34,6 +34,10 @@
     {
       "config": "farplanetwocontinuation.client.mixins.json",
       "environment": "client"
+    },
+    {
+      "config": "farplanetwocontinuation.iris.mixins.json",
+      "environment": "client"
     }
   ],
   "depends": {

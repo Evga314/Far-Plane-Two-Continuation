@@ -25,6 +25,11 @@ public class ClientConfig {
      */
     public boolean forceLodWithShaders = false;
     /**
+     * With a shader pack the borders of the distant terrain (the snow line, forest edges, biomes) are cut into it sharp; this cuts the
+     * soft ones twice, with the colors blended between the cuts, for a little more video memory. Off by default.
+     */
+    public boolean shaderSoftBorders = false;
+    /**
      * Vanilla's far plane is a horizontal distance, so from high up the edge of the cloud layer falls past it and the clouds are cut
      * off; this extends the far plane to the slant distance to that edge. Off by default.
      */

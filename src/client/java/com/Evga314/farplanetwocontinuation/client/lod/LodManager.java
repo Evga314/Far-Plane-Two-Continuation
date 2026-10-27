@@ -130,7 +130,7 @@ public final class LodManager {
     public boolean isActive() {
         ClientLevel level = this.minecraft.level;
         return this.config.enabled
-            && (this.config.forceLodWithShaders || !IrisCompat.shadersActive())
+            && (this.config.forceLodWithShaders || LodRenderer.irisPass || !IrisCompat.shadersActive())
             && this.hello != null
             && this.hello.enabled()
             && this.hello.protocol() == FarPlaneConstants.PROTOCOL_VERSION
@@ -536,6 +536,30 @@ public final class LodManager {
         }
     }
 
+    /**
+     * With Iris: whether the mod takes Distant Horizons' place in it (for now only with the new renderer, still behind its debug
+     * toggle), whether the pack draws the LOD terrain this frame (see IrisOutput) and so whether tiles are built for it. Tiles are built
+     * again when that or their borders change.
+     */
+    private void followShaderPack() {
+        if (!IrisGlue.available()) {
+            return;
+        }
+        IrisGlue.want(this.config.enabled && this.config.newRenderer && DebugToggles.surface);
+        boolean pass = GpuCaps.irisPass(this.config);
+        LodRenderer.irisPass = pass;
+        boolean soft = this.config.shaderSoftBorders;
+        if (IrisGlue.packMeshes != pass || pass && IrisGlue.softBorders != soft) {
+            IrisGlue.packMeshes = pass;
+            IrisGlue.softBorders = soft;
+            this.resetTiles();
+        }
+        // As DH's (see Iris's DHCompatInternal): the far plane past the corners of the reach, the near one close, for the ring under
+        // vanilla's edge and tiles under the camera seen from high above.
+        int reach = Math.max(this.activeLodDistance, 512);
+        IrisGlue.planes(IrisGlue.NEAR_PLANE, (float) ((reach + 512) * Math.sqrt(2.0)), reach);
+    }
+
     private void tickLod() {
         this.tick++;
         if (DebugToggles.refresh()) {
@@ -551,8 +575,8 @@ public final class LodManager {
             // depth runs from -1 to 1 (OpenGL without clip control, as on phones through LTW): the far plane at infinity in vanilla's
             // depth buffer then leaves too little precision, and the LOD terrain and vanilla's blocks fought over it as the camera
             // turned.
-            LodRenderer.mainPassPrototype = this.config.newRenderer && !IrisCompat.shadersActive() && !DebugToggles.noMainPass && !DebugToggles.surface
-                && RenderSystem.getDevice().getDeviceInfo().isZZeroToOne();
+            LodRenderer.mainPassPrototype = GpuCaps.vanillaPass(this.config);
+            this.followShaderPack();
         }
         if (!this.isActive() || level == null) {
             if (this.rough.hasWork() || this.detail.hasWork()) {

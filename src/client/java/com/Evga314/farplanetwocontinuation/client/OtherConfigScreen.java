@@ -9,7 +9,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.options.OptionsSubScreen;
 import net.minecraft.network.chat.Component;
 
-/** Settings that are not about the terrain itself: fixes for vanilla, how the mod gets along with other mods, and its cache. */
+/** Settings that are not about the terrain itself: fixes for vanilla, and the mod's cache. Shader packs have their own, see ShaderConfigScreen. */
 public class OtherConfigScreen extends OptionsSubScreen {
     private static final String PREFIX = FarPlaneConstants.MOD_ID + ".options.";
 
@@ -23,13 +23,9 @@ public class OtherConfigScreen extends OptionsSubScreen {
             return;
         }
         ClientConfig config = FarplanetwocontinuationClient.manager().config();
-        OptionInstance<Boolean> forceLodWithShaders = OptionInstance.createBoolean(
-            PREFIX + "force_lod_with_shaders", OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "force_lod_with_shaders.tooltip")), config.forceLodWithShaders, value -> config.forceLodWithShaders = value
-        );
         OptionInstance<Boolean> cloudFarPlane = OptionInstance.createBoolean(
             PREFIX + "cloud_far_plane", OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "cloud_far_plane.tooltip")), config.extendCloudFarPlane, value -> config.extendCloudFarPlane = value
         );
-        this.list.addBig(forceLodWithShaders);
         this.list.addBig(cloudFarPlane);
         OptionInstance<Boolean> newRenderer = OptionInstance.createBoolean(
             PREFIX + "new_renderer", OptionInstance.cachedConstantTooltip(Component.translatable(PREFIX + "new_renderer.tooltip")), config.newRenderer, value -> config.newRenderer = value

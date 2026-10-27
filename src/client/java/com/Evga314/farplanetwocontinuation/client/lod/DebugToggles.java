@@ -42,6 +42,8 @@ final class DebugToggles {
     static volatile boolean surfaceMesh;
     /** Draws the rough tiles with the new renderer's mesh and pass (stage 3 of the rewrite), see OwnPassOutput. */
     static volatile boolean surface;
+    /** Tints the ring the new renderer draws under vanilla's edge, see OwnershipMap. */
+    static volatile boolean markRing;
 
     private static long checkedAt;
 
@@ -76,6 +78,7 @@ final class DebugToggles {
         // These two need no tiles built again.
         boolean frameMask = noFrameMask != (noFrameMask = check(config, "farplane-debug-no-frame-mask"));
         boolean mainPass = noMainPass != (noMainPass = check(config, "farplane-debug-no-main-pass"));
+        markRing = check(config, "farplane-debug-mark-ring");
         if (frameMask || mainPass) {
             LOGGER.info("[FarPlane debug] chunks along vanilla's edge asked every frame {}, LOD terrain in vanilla's main pass {}", !noFrameMask, !noMainPass);
         }

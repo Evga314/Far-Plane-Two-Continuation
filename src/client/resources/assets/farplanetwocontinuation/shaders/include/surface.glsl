@@ -19,6 +19,10 @@ layout(std140) uniform SurfaceFrame {
 layout(std140) uniform SurfaceTile {
     // xyz: the tile's north-west corner at its base height, from the camera; w: blocks per unit of x and z.
     vec4 TileOffset;
+    // The debug build tints the ring the rough terrain draws under vanilla's edge (see OwnershipMap): rgb, and how much.
+    vec4 TileTint;
+    // x: how much farther from the camera the tile is put for the depth test (see FrameDrawList.DEPTH_PUSH).
+    vec4 TileParams;
 };
 
 #ifdef SURFACE_FRAGMENT

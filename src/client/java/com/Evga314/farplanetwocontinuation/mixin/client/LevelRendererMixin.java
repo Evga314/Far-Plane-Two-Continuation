@@ -97,6 +97,22 @@ abstract class LevelRendererMixin {
      * Prototype: the LOD water after vanilla's solid entities, before its translucent things and its own water. Both ways of
      * transparency draw the solid things in this pass; with the improved one vanilla's water is blended over it later.
      */
+    /** With a shader pack, after its deferred passes: the water of the LOD terrain, drawn by the pack's DH water program (IrisOutput). */
+    @Inject(method = "executeClassicTransparency", at = @At("HEAD"))
+    private void farplane$packWater(
+        net.minecraft.client.renderer.chunk.ChunkSectionsToRender chunks,
+        net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame featureFrame,
+        com.mojang.renderpearl.api.commands.RenderPass renderPass,
+        CallbackInfo ci
+    ) {
+        LodRenderer renderer = FarplanetwocontinuationClient.renderer();
+        if (renderer != null) {
+            renderer.renderPackWater();
+        } else {
+            IrisGlue.drawWater(null);
+        }
+    }
+
     @Inject(method = "executeSolid", at = @At("TAIL"))
     private void farplane$lodWater(
         net.minecraft.client.renderer.chunk.ChunkSectionsToRender chunks,

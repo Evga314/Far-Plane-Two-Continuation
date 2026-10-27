@@ -30,6 +30,9 @@ public final class IrisGlue {
         /** Vanilla's opaque things are drawn: the depth of the LOD terrain is cleared if it was not drawn this frame. */
         void endSolid();
 
+        /** After the pack's deferred passes, before vanilla's translucent things: the water of the frame's rough tiles, if drawn. */
+        void drawWater(@Nullable FrameDrawList list);
+
         /** Builds the pack again, for the DISTANT_HORIZONS define to come or go. */
         void reload();
     }
@@ -111,6 +114,13 @@ public final class IrisGlue {
     static void drawTerrain(FrameDrawList list) {
         if (BRIDGE != null) {
             BRIDGE.drawTerrain(list);
+        }
+    }
+
+    /** See Bridge.drawWater; with null only the depth for dhDepthTex1 is brought up to date. */
+    public static void drawWater(@Nullable FrameDrawList list) {
+        if (BRIDGE != null) {
+            BRIDGE.drawWater(list);
         }
     }
 

@@ -203,6 +203,20 @@ class PackMesherTest {
     }
 
     @Test
+    void skirtsFaceOutwards() {
+        SurfaceMesh mesh = pack(tile(4, 5), false);
+        // Faces by side of the tile: the skirt along z = 0 faces north, along x = 0 west, and so on; the ground faces up.
+        int[] seen = new int[6];
+        ByteBuffer v = mesh.vertices();
+        for (int i = 0; i < mesh.vertexCount(); i++) {
+            seen[v.get(i * PackMesher.SIZE + PackMesher.EXTRA + 1)]++;
+        }
+        for (int face = 1; face < 6; face++) {
+            assertTrue(seen[face] > 0, "face " + face);
+        }
+    }
+
+    @Test
     void faces() {
         assertEquals(1, PackMesher.face(0.1F, 0.9F, 0.0F));
         assertEquals(5, PackMesher.face(0.8F, 0.3F, 0.0F));

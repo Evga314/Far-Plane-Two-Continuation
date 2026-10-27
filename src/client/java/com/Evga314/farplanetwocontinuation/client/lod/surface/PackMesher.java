@@ -85,6 +85,8 @@ public final class PackMesher {
         final float[][] cutWeights = {new float[24], new float[24], new float[24]};
         final long[] cutKeys = new long[8];
         final int[] corners = new int[3];
+        /** The face of the triangle being cut when all its vertices take it (a skirt), else -1. */
+        int face = -1;
 
         void grow(int count) {
             if (this.x.length >= count) {
@@ -210,6 +212,7 @@ public final class PackMesher {
         corners[0] = a;
         corners[1] = b;
         corners[2] = c;
+        work.face = skirtFace(work, a, b, c);
         float soft = softBorders ? Math.max(work.soft[a], Math.max(work.soft[b], work.soft[c])) : 0.0F;
         boolean sameColors = work.second[a] == work.second[b] && work.second[a] == work.second[c];
         float lowest = Math.min(work.value[a], Math.min(work.value[b], work.value[c]));
@@ -392,7 +395,7 @@ public final class PackMesher {
             return emitCorner(work, (int) (place & 0xFFFF), side);
         }
         // Points of a soft border's cuts are the same on both sides (the blend starts and ends there); those of a sharp one are not.
-        long key = 1L << 40 | (level == 0 ? place | (long) side << 36 : place);
+        long key = 1L << 40 | (long) (work.face + 1) << 44 | (level == 0 ? place | (long) side << 36 : place);
         int slot = find(work, key);
         if (work.stamps[slot] == work.stamp) {
             return work.ids[slot];
@@ -419,7 +422,7 @@ public final class PackMesher {
 
     /** A source vertex on one side of the border, made once per side. */
     private static int emitCorner(Work work, int vertex, int side) {
-        long key = 2L << 40 | (long) side << 16 | vertex;
+        long key = 2L << 40 | (long) (work.face + 1) << 44 | (long) side << 16 | vertex;
         int slot = find(work, key);
         if (work.stamps[slot] == work.stamp) {
             return work.ids[slot];
@@ -507,7 +510,7 @@ public final class PackMesher {
         float nx = wa * work.nx[a] + wb * work.nx[b] + wc * work.nx[c];
         float ny = wa * work.ny[a] + wb * work.ny[b] + wc * work.ny[c];
         float nz = wa * work.nz[a] + wb * work.nz[b] + wc * work.nz[c];
-        int face = (bits & LodVertex.BIT_UNDERSIDE) != 0 ? DOWN : face(nx, ny, nz);
+        int face = work.face >= 0 ? work.face : (bits & LodVertex.BIT_UNDERSIDE) != 0 ? DOWN : face(nx, ny, nz);
 
         work.vertices = ensure(work.vertices, SIZE);
         ByteBuffer out = work.vertices;
@@ -518,6 +521,25 @@ public final class PackMesher {
         out.put((byte) (shown >>> 16)).put((byte) (shown >>> 8)).put((byte) shown).put((byte) alpha);
         out.put((byte) material).put((byte) face).put((byte) 0).put((byte) 0);
         return work.vertexCount++;
+    }
+
+    /**
+     * The face of a skirt's triangle (one with the bottom of a skirt among its corners), from its own slant: a skirt hangs straight
+     * down, and with the normal of the ground it hangs from the pack would light it as ground facing the sky. -1 for others, whose
+     * vertices take the normals of the ground.
+     */
+    private static int skirtFace(Work work, int a, int b, int c) {
+        if (((work.bits[a] | work.bits[b] | work.bits[c]) & LodVertex.BIT_SKIRT) == 0) {
+            return -1;
+        }
+        float ux = work.x[b] - work.x[a];
+        float uy = work.y[b] - work.y[a];
+        float uz = work.z[b] - work.z[a];
+        float vx = work.x[c] - work.x[a];
+        float vy = work.y[c] - work.y[a];
+        float vz = work.z[c] - work.z[a];
+        // The front faces turn counterclockwise, as OpenGL's.
+        return face(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
     }
 
     /** The direction in DH's table nearest to a normal. */

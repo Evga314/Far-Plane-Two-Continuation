@@ -598,13 +598,24 @@ public final class LodRenderer {
         this.depthTiles.clear();
     }
 
+    /**
+     * With a shader pack, before vanilla's translucent things: the water of the rough terrain this frame, see IrisOutput; else only
+     * the pack's depth of the LOD terrain without water is brought up to date.
+     */
+    public void renderPackWater() {
+        IrisGlue.drawWater(irisPass && this.drawList.hasTiles() ? this.drawList : null);
+    }
+
     /** Prototype: the drawing prepared for vanilla's main pass this frame, the opaque terrain and the water. */
     private java.util.function.@Nullable Consumer<RenderPass> pendingDraw;
     private java.util.function.@Nullable Consumer<RenderPass> pendingWater;
 
     private void renderLod(@Nullable RenderTarget target, CameraRenderState camera, @Nullable GpuBufferSlice fog, boolean inMain) {
-        CompiledRenderPipeline pipeline = this.compiledPipeline(PIPELINE);
-        if (pipeline == null || !inMain && (target == null || target.getDepthTextureView() == null)) {
+        // With a shader pack drawing the rough terrain (see IrisOutput) none of the mod's own pipelines is used: Iris would only log
+        // that it has no program for them.
+        boolean pack = inMain && irisPass;
+        CompiledRenderPipeline pipeline = pack ? null : this.compiledPipeline(PIPELINE);
+        if (!pack && (pipeline == null || !inMain && (target == null || target.getDepthTextureView() == null))) {
             return;
         }
 
@@ -645,7 +656,7 @@ public final class LodRenderer {
         int maxQuads = 0;
         double vanillaFar = camera.depthFar;
         boolean end = minecraft.level != null && DimensionKind.of(minecraft.level) == DimensionKind.END;
-        if (end) {
+        if (end && !pack) {
             // If the floating variant failed to compile the rough tiles keep the old edge, half way to the void sample.
             CompiledRenderPipeline floatingPipeline = this.compiledPipeline(FLOATING_PIPELINE);
             if (floatingPipeline != null) {
@@ -753,6 +764,16 @@ public final class LodRenderer {
         float underRadius = Math.max(ringRadius, (float) this.manager.vanillaRadius());
         float waterBlur = blurWidth(this.manager.config().distant().smoothing.waterBlur);
         float coastBlur = blurWidth(this.manager.config().distant().smoothing.coastsBlur);
+        if (pack) {
+            // The shader pack's programs draw the rough terrain and its water; the detailed tiles are not drawn with a pack until they
+            // take the new mesh too (stage 7 of the rewrite). Nothing of the old passes is written.
+            Matrix4f vanillaProjection = this.bobbedProjection != null ? this.bobbedProjection : camera.projectionMatrix;
+            this.drawList.prepare(this.visible, camX, camY, camZ, camera.viewRotationMatrix, vanillaProjection, zeroToOne, UNLIT, hasSky,
+                NO_SKY_FOG_RED, NO_SKY_FOG_GREEN, NO_SKY_FOG_BLUE, canopyStart, waterBlur);
+            this.pendingDraw = pass -> IrisGlue.drawTerrain(this.drawList);
+            this.pendingWater = null;
+            return;
+        }
 
         // The tiles' own transforms first, then those of the chunks vanilla draws partly, see Frame.
         Frame frame = this.frame;
@@ -861,13 +882,6 @@ public final class LodRenderer {
             NO_SKY_FOG_RED, NO_SKY_FOG_GREEN, NO_SKY_FOG_BLUE, canopyStart, waterBlur);
         if (PerfLog.ON) {
             phase = PerfLog.renderPhase(3, phase);
-        }
-        if (inMain && irisPass) {
-            // The shader pack's programs draw the rough terrain; the detailed tiles are not drawn with a pack until they take the new
-            // mesh too (stage 7 of the rewrite), nor the water yet.
-            this.pendingDraw = pass -> IrisGlue.drawTerrain(this.drawList);
-            this.pendingWater = null;
-            return;
         }
 
         if (this.projectionBuffer == null) {

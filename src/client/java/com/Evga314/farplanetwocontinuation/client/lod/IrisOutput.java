@@ -30,7 +30,6 @@ import org.lwjgl.opengl.GL20C;
 import org.lwjgl.opengl.GL30C;
 import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
-import net.minecraft.world.attribute.EnvironmentAttributes;
 
 
 /**
@@ -183,7 +182,7 @@ final class IrisOutput implements IrisGlue.Bridge {
             if (draw) {
                 programs.waterFramebuffer.bind();
                 GlStateManager._enableDepthTest();
-                GlStateManager._depthFunc(GL11C.GL_LEQUAL);
+                GlStateManager._depthFunc(GL11C.GL_GEQUAL);
                 GlStateManager._depthMask(true);
                 // Seen from below too, as Iris draws DH's water.
                 GlStateManager._disableCull();
@@ -196,29 +195,11 @@ final class IrisOutput implements IrisGlue.Bridge {
         } else {
             programs.framebuffer.bind();
             GlStateManager._depthMask(true);
-            GlStateManager._clearBuffer(1.0);
-            // The DH colour is cleared to the sky, as DH clears its own: the pack mixes this colour into the distance and the
-// sky, so black would hang over the world as a haze; the alpha is zero, as DH's, for no DH terrain here.
-// Цвет DH очищается в цвет неба, как это делает сам DH: пак подмешивает этот цвет в даль и в небо, поэтому чёрный
-// лёг бы на мир дымкой; альфа нулевая, как у DH, - ландшафта DH здесь нет.
-            float skyR = 0.0F;
-            float skyG = 0.0F;
-            float skyB = 0.0F;
-            var level = Minecraft.getInstance().level;
-            if (level != null && level.dimensionType().hasSkyLight()) {
-                var sky = level.environmentAttributes().getValue(EnvironmentAttributes.SKY_COLOR, Minecraft.getInstance().gameRenderer.mainCamera().position());
-                skyR = sky.x();
-                skyG = sky.y();
-                skyB = sky.z();
-            }
-            GL11C.glClearColor(skyR, skyG, skyB, 0.0F);
-            GL30C.glClearBufferfv(GL11C.GL_COLOR, 0, new float[] {skyR, skyG, skyB, 0.0F});
-
-
+            GlStateManager._clearBuffer(0.0);
 
             if (stage == TERRAIN && draw) {
                 GlStateManager._enableDepthTest();
-                GlStateManager._depthFunc(GL11C.GL_LEQUAL);
+                GlStateManager._depthFunc(GL11C.GL_GEQUAL);
                 GlStateManager._enableCull();
                 for (int i = 0; i < MAX_DRAW_BUFFERS; i++) {
                     GlStateManager._disableBlend(i);
@@ -260,7 +241,11 @@ final class IrisOutput implements IrisGlue.Bridge {
     /** The ground nearest first, or the water farthest first, so it blends over what lies behind it; of every tile its own columns. */
     private void drawTiles(IrisLodRenderProgram program, FrameDrawList list, boolean water) {
         program.bind();
-        IrisGlue.projection(CapturedRenderingState.INSTANCE.getGbufferProjection(), this.projection);
+        // The pack's DH programs are drawn with the pipeline's own projection, which Iris keeps reversed; the forward
+// projection of IrisGlue.projection belongs only to the dhProjection uniform, where DHCompat gives the same.
+// DH-программы пака рисуются собственной проекцией пайплайна, которую Iris держит перевёрнутой; прямая проекция
+// из IrisGlue.projection нужна только юниформу dhProjection, где DHCompat отдаёт такую же.
+        this.projection.set(CapturedRenderingState.INSTANCE.getGbufferProjection());
         this.modelView.set(CapturedRenderingState.INSTANCE.getGbufferModelView());
         // TEMP CHECK: the model view shift against the draw list camera
         if (!water && PerfLog.ON && ++this.debugFrames % 300 == 1) {

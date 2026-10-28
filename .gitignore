@@ -25,3 +25,6 @@ src/gametest/
 
 #not needed bin
 bin
+
+#iris tests
+iris

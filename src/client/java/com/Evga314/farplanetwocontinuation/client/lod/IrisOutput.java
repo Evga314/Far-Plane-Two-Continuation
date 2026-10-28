@@ -30,6 +30,8 @@ import org.lwjgl.opengl.GL20C;
 import org.lwjgl.opengl.GL30C;
 import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
+import net.minecraft.world.attribute.EnvironmentAttributes;
+
 
 /**
  * Draws the new renderer's rough terrain ({@link FrameDrawList}) with a shader pack's DH programs, see IrisGlue: the third output beside
@@ -195,12 +197,23 @@ final class IrisOutput implements IrisGlue.Bridge {
             programs.framebuffer.bind();
             GlStateManager._depthMask(true);
             GlStateManager._clearBuffer(1.0);
-            // TEMP TEST: clear the DH colour too; no full-screen draw overwrites it here, as DH's own does.
-// ВРЕМЕННЫЙ ТЕСТ: очищать и цвет DH; здесь его целиком не перезаписывает никакая отрисовка, как это делает сам DH.
-            GL11C.glClearColor(0.0F, 0.0F, 0.0F, 0.0F); //удалить потом
-            GlStateManager._clear(GL11C.GL_COLOR_BUFFER_BIT);//удалить потом
+            // The DH colour is cleared to the sky, as DH clears its own: the pack mixes this colour into the distance and the
+// sky, so black would hang over the world as a haze; the alpha is zero, as DH's, for no DH terrain here.
+// Цвет DH очищается в цвет неба, как это делает сам DH: пак подмешивает этот цвет в даль и в небо, поэтому чёрный
+// лёг бы на мир дымкой; альфа нулевая, как у DH, - ландшафта DH здесь нет.
+            float skyR = 0.0F;
+            float skyG = 0.0F;
+            float skyB = 0.0F;
+            var level = Minecraft.getInstance().level;
+            if (level != null && level.dimensionType().hasSkyLight()) {
+                var sky = level.environmentAttributes().getValue(EnvironmentAttributes.SKY_COLOR, Minecraft.getInstance().gameRenderer.mainCamera().position());
+                skyR = sky.x();
+                skyG = sky.y();
+                skyB = sky.z();
+            }
+            GL11C.glClearColor(skyR, skyG, skyB, 0.0F);
+            GlStateManager._clear(GL11C.GL_COLOR_BUFFER_BIT);
 
-            GlStateManager._clear(GL11C.GL_COLOR_BUFFER_BIT);// потом удалить
 
             if (stage == TERRAIN && draw) {
                 GlStateManager._enableDepthTest();

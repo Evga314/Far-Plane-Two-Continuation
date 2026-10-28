@@ -212,7 +212,8 @@ final class IrisOutput implements IrisGlue.Bridge {
                 skyB = sky.z();
             }
             GL11C.glClearColor(skyR, skyG, skyB, 0.0F);
-            GlStateManager._clear(GL11C.GL_COLOR_BUFFER_BIT);
+            GL30C.glClearBufferfv(GL11C.GL_COLOR, 0, new float[] {skyR, skyG, skyB, 0.0F});
+
 
 
             if (stage == TERRAIN && draw) {

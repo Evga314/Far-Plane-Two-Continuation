@@ -15,10 +15,10 @@ Latest release versions available on [Curseforge](https://www.curseforge.com/min
 
 ## Installation
 
-| Where you play | Where to install |
-|---|---|
-| Singleplayer (PC or phone) | client only |
-| Server | both the server and every client |
+| Where you play             | Where to install                 |
+|----------------------------|----------------------------------|
+| Singleplayer (PC or phone) | client only                      |
+| Server                     | both the server and every client |
 
 Fabric API for 26.3 is required. If the server does not have the mod, the client simply does not draw LOD terrain and the game works
 as usual.

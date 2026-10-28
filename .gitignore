@@ -26,5 +26,6 @@ src/gametest/
 #not needed bin
 bin
 
-#iris tests
+#iris
 iris
+src_iris

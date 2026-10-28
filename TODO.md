@@ -22,6 +22,8 @@ But... wait. I have an idea to add underground generation for the far terrain to
 
  добавить поддержку мода Fog
 
+flashback support later
+
 
 брать для генерации виртуальных чанков кеш из ванильных сгенерированных чанков
 

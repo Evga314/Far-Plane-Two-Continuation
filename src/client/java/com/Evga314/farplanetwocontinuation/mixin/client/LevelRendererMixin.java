@@ -69,6 +69,27 @@ abstract class LevelRendererMixin {
     private net.minecraft.client.renderer.state.level.LevelRenderState levelRenderState;
 
     /**
+     * With a shader pack: the LOD terrain is drawn before vanilla's opaque chunks, as Distant Horizons draws its own (its
+     * mixin enters at the head of the opaque section group). The pack's DH programs write into the pipeline's shared
+     * colour targets, so per pixel the last writer owns the material: drawn first, the LOD terrain is overwritten by
+     * vanilla wherever vanilla has geometry, and the pack's composites arbitrate the rest by depth. Drawn after vanilla
+     * it would paint its material over the nearer vanilla terrain, which no depth test in the pack can undo. */
+    @Inject(method = "executeSolid", at = @At("HEAD"))
+    private void farplane$packTerrainBeforeChunks(
+            net.minecraft.client.renderer.chunk.ChunkSectionsToRender chunks,
+            net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame featureFrame,
+            com.mojang.renderpearl.api.commands.RenderPass renderPass,
+            CallbackInfo ci
+    ) {
+        LodRenderer renderer = FarplanetwocontinuationClient.renderer();
+        if (renderer == null || !LodRenderer.irisPass) {
+            return;
+        }
+        renderer.renderPackTerrain(renderPass);
+    }
+
+
+    /**
      * Prototype: the LOD terrain drawn inside vanilla's main pass, right after its opaque chunks and before entities, into the same
      * depth buffer. Where vanilla drew a block in front, the LOD's fragments are rejected before they are shaded.
      */

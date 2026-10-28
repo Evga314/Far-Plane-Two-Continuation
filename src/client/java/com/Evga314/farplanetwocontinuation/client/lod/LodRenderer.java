@@ -557,6 +557,23 @@ public final class LodRenderer {
             PerfLog.renderTime(System.nanoTime() - start);
         }
     }
+    /**
+     * With a shader pack: draws the opaque terrain {@link #prepareMainPass} prepared BEFORE vanilla's opaque chunks, see
+     * LevelRendererMixin for why the order matters. Takes the prepared draw, so {@link #renderInMainPass} finds nothing
+     * left for the pack this frame. */
+
+    public void renderPackTerrain(RenderPass pass) {
+        java.util.function.Consumer<RenderPass> draw = this.pendingDraw;
+        if (!irisPass || draw == null) {
+            return;
+        }
+        this.pendingDraw = null;
+        long start = PerfLog.ON ? System.nanoTime() : 0L;
+        draw.accept(pass);
+        if (PerfLog.ON) {
+            PerfLog.renderTime(System.nanoTime() - start);
+        }
+    }
 
     /**
      * Prototype, second half: draws the opaque terrain {@link #prepareMainPass} prepared into vanilla's main pass, right after vanilla's

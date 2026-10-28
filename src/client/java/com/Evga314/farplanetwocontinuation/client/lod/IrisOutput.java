@@ -195,6 +195,13 @@ final class IrisOutput implements IrisGlue.Bridge {
             programs.framebuffer.bind();
             GlStateManager._depthMask(true);
             GlStateManager._clearBuffer(1.0);
+            // TEMP TEST: clear the DH colour too; no full-screen draw overwrites it here, as DH's own does.
+// ВРЕМЕННЫЙ ТЕСТ: очищать и цвет DH; здесь его целиком не перезаписывает никакая отрисовка, как это делает сам DH.
+            GL11C.glClearColor(0.0F, 0.0F, 0.0F, 0.0F); //удалить потом
+            GlStateManager._clear(GL11C.GL_COLOR_BUFFER_BIT);//удалить потом
+
+            GlStateManager._clear(GL11C.GL_COLOR_BUFFER_BIT);// потом удалить
+
             if (stage == TERRAIN && draw) {
                 GlStateManager._enableDepthTest();
                 GlStateManager._depthFunc(GL11C.GL_LEQUAL);

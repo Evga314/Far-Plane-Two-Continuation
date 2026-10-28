@@ -191,7 +191,7 @@ final class IrisOutput implements IrisGlue.Bridge {
             if (stage == TERRAIN && draw) {
                 GlStateManager._enableDepthTest();
                 GlStateManager._depthFunc(GL11C.GL_LEQUAL);
-                GlStateManager._disableCull();
+                GlStateManager._enableCull();
                 for (int i = 0; i < MAX_DRAW_BUFFERS; i++) {
                     GlStateManager._disableBlend(i);
                 }

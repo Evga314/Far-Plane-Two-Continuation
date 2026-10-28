@@ -20,6 +20,7 @@ import net.irisshaders.iris.uniforms.CapturedRenderingState;
 import net.minecraft.client.Minecraft;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.opengl.GL11C;
@@ -241,7 +242,13 @@ final class IrisOutput implements IrisGlue.Bridge {
             LOGGER.info("[FarPlane iris] modelView shift {}, {}, {} list cam {}, {}, {}", this.modelView.m30(), this.modelView.m31(),
                     this.modelView.m32(), list.camX(), list.camY(), list.camZ());
         }
-        this.modelView.setTranslation(0.0F, 0.0F, 0.0F); // TEMP A/B: zero the model view shift
+        // TEMP CHECK: my projection against the pack's own. / ВРЕМЕННАЯ ПРОВЕРКА: моя проекция против проекции пака.
+        if (!water && PerfLog.ON && this.debugFrames % 300 == 1) {
+            Matrix4fc gbuffer = CapturedRenderingState.INSTANCE.getGbufferProjection();
+            LOGGER.info("[FarPlane iris] proj mine {}, {} gbuffer {}, {}", this.projection.m00(), this.projection.m11(), gbuffer.m00(),
+                    gbuffer.m11());
+        }
+
         this.matrix(program.modelViewUniform, this.modelView);
         this.matrix(program.modelViewInverseUniform, this.modelView.invert(this.inverse));
         this.matrix(program.projectionUniform, this.projection);

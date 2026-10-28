@@ -237,11 +237,7 @@ final class IrisOutput implements IrisGlue.Bridge {
     /** The ground nearest first, or the water farthest first, so it blends over what lies behind it; of every tile its own columns. */
     private void drawTiles(IrisLodRenderProgram program, FrameDrawList list, boolean water) {
         program.bind();
-        // The pack's DH programs are drawn with the pipeline's own projection, which Iris keeps reversed; the forward
-// projection of IrisGlue.projection belongs only to the dhProjection uniform, where DHCompat gives the same.
-// DH-программы пака рисуются собственной проекцией пайплайна, которую Iris держит перевёрнутой; прямая проекция
-// из IrisGlue.projection нужна только юниформу dhProjection, где DHCompat отдаёт такую же.
-        this.projection.set(CapturedRenderingState.INSTANCE.getGbufferProjection());
+        IrisGlue.projection(CapturedRenderingState.INSTANCE.getGbufferProjection(), this.projection);
         this.modelView.set(CapturedRenderingState.INSTANCE.getGbufferModelView());
         // TEMP CHECK: the model view shift against the draw list camera
         if (!water && PerfLog.ON && ++this.debugFrames % 300 == 1) {

@@ -56,6 +56,8 @@ final class IrisOutput implements IrisGlue.Bridge {
     private boolean waterPending;
     private int debugCalls;
     private int debugWater;
+    private int debugFrames;
+
     private boolean failed;
     private final Matrix4f projection = new Matrix4f();
     private final Matrix4f modelView = new Matrix4f();
@@ -234,6 +236,12 @@ final class IrisOutput implements IrisGlue.Bridge {
         program.bind();
         IrisGlue.projection(CapturedRenderingState.INSTANCE.getGbufferProjection(), this.projection);
         this.modelView.set(CapturedRenderingState.INSTANCE.getGbufferModelView());
+        // TEMP CHECK: the model view shift against the draw list camera
+        if (!water && PerfLog.ON && ++this.debugFrames % 300 == 1) {
+            LOGGER.info("[FarPlane iris] modelView shift {}, {}, {} list cam {}, {}, {}", this.modelView.m30(), this.modelView.m31(),
+                    this.modelView.m32(), list.camX(), list.camY(), list.camZ());
+        }
+        this.modelView.setTranslation(0.0F, 0.0F, 0.0F); // TEMP A/B: zero the model view shift
         this.matrix(program.modelViewUniform, this.modelView);
         this.matrix(program.modelViewInverseUniform, this.modelView.invert(this.inverse));
         this.matrix(program.projectionUniform, this.projection);
@@ -279,7 +287,15 @@ final class IrisOutput implements IrisGlue.Bridge {
             if (draws == 0) {
                 continue;
             }
-            GL20C.glUniform3f(program.modelOffsetUniform, (float) (mesh.pos.minX() - camX), (float) (surface.baseY() - camY), (float) (mesh.pos.minZ() - camZ));
+            float offsetX = (float) (mesh.pos.minX() - camX);
+            float offsetY = (float) (surface.baseY() - camY);
+            float offsetZ = (float) (mesh.pos.minZ() - camZ);
+            GL20C.glUniform3f(program.modelOffsetUniform, offsetX, offsetY, offsetZ);
+// TEMP CHECK: the first tile's numbers. / ВРЕМЕННАЯ ПРОВЕРКА: числа первого тайла.
+            if (!water && PerfLog.ON && i == 0) {
+                LOGGER.info("[FarPlane iris] tile {} baseY {} offset {}, {}, {} camY {}", mesh.pos, surface.baseY(), offsetX, offsetY,
+                        offsetZ, camY);
+            }
             int handle = buffer.handle();
             if (handle != bound) {
                 GlStateManager._glBindBuffer(GL15C.GL_ARRAY_BUFFER, handle);

@@ -100,8 +100,12 @@ final class IrisOutput implements IrisGlue.Bridge {
         if (programs == null || ShadowRenderingState.areShadowsCurrentlyBeingRendered()) {
             return;
         }
-        this.drawn = true;
-        this.safely(programs, list, TERRAIN);
+        // BACKUP this.drawn = true;
+        // BACkUP   this.safely(programs, list, TERRAIN);
+
+        // TEMP TEST: clear the DH depth only, draw nothing at all. / ВРЕМЕННЫЙ ТЕСТ: только очистить глубину DH, не рисовать ничего.
+        this.safely(programs, null, CLEAR);
+
     }
 
     @Override

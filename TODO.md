@@ -30,6 +30,8 @@ But... wait. I have an idea to add underground generation for the far terrain to
 
 flashback support later
 
+После официального релиза для обычного майна, переписать под HORIZON (майнкрафт 26.3, переписанный на язык Rust)
+
 
 брать для генерации виртуальных чанков кеш из ванильных сгенерированных чанков
 

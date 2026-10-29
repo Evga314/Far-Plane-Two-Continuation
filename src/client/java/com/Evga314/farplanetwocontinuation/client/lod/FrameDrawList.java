@@ -112,6 +112,8 @@ final class FrameDrawList implements AutoCloseable {
     private final OwnershipMap ownership = new OwnershipMap();
     /** The seam sewn along the border of vanilla's columns, see BorderSeam. / Шов, сшитый вдоль границы колонок ваниллы, см. BorderSeam. */
     private final BorderSeam seam = new BorderSeam();
+    /** The frame's detailed tiles with a kept edge, for the seam to sew the rough terrain to (see BorderSeam). / Детальные тайлы кадра с сохранённой кромкой, чтобы шов сшивал к ним дальний ландшафт (см. BorderSeam). */
+    private final List<TileMesh> seamDetailTiles = new ArrayList<>();
     private boolean[] vanillaColumns = new boolean[0];
     private boolean[] detailedColumns = new boolean[0];
     /** The ring's buffer, see {@link #ringInfo}, and the version of the map each of its three buffers holds. */
@@ -151,9 +153,16 @@ final class FrameDrawList implements AutoCloseable {
         this.camY = camY;
         this.camZ = camZ;
         this.tiles.clear();
+        this.seamDetailTiles.clear();
         for (TileMesh mesh : visible) {
             if (mesh.surface != null) {
                 this.tiles.add(mesh);
+            } else if (!IrisGlue.packMeshes && mesh.detail && mesh.detailEdges != null) {
+                // The seam sews to the detailed tiles the frame draws. Under a shader pack none are drawn yet, so none are
+                // handed over; when packs learn to draw them, hand them over here and the seam follows on its own.
+                // / Шов шьётся к детальным тайлам, которые рисует кадр. Под шейдерным паком они пока не рисуются, поэтому не
+                // передаются; когда паки научатся их рисовать, передавать их надо будет здесь, и шов последует сам.
+                this.seamDetailTiles.add(mesh);
             }
         }
         this.tileSlices = null;
@@ -209,7 +218,7 @@ final class FrameDrawList implements AutoCloseable {
             }
             this.parts(mesh, mask, camY, this.parts[i]);
         }
-        this.seam.update(Minecraft.getInstance().level, this.ownership, this.tiles, this.parts, camX, camY, camZ);
+        this.seam.update(Minecraft.getInstance().level, this.ownership, this.tiles, this.parts, this.seamDetailTiles, camX, camY, camZ);
         this.tileSlices = this.tileStorage.writeData(written);
     }
 

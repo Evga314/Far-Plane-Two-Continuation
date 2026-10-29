@@ -49,6 +49,7 @@ final class TileMesh implements AutoCloseable {
     final int @Nullable [] seamColors;
     final byte @Nullable [] seamBits;
     final int @Nullable [] seamSkirts;
+    final float @Nullable [] detailEdges;
     /** Rough tiles: lowest ground of each part of the tile, for {@link Horizon}. */
     final float @Nullable [] partLows;
     /** Hidden behind terrain this tick, see {@link Horizon}. */
@@ -115,6 +116,7 @@ final class TileMesh implements AutoCloseable {
         this.seamColors = built.seamColors();
         this.seamBits = built.seamBits();
         this.seamSkirts = built.seamSkirts();
+        this.detailEdges = built.detailEdges();
         this.partLows = !built.detail() && built.heights() != null ? Horizon.partLows(built.heights()) : null;
     }
 

@@ -27,9 +27,9 @@ final class VanillaPassOutput {
 
     void drawGround(RenderPass pass) {
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.GROUND), false, OwnershipMap.OWN, Double.MAX_VALUE);
+        this.drawList.drawSeam(pass, this.compile.apply(SurfacePipelines.GROUND));
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.BACKGROUND), false, OwnershipMap.BACKGROUND, Double.MAX_VALUE);
     }
-
     void drawWater(RenderPass pass) {
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.WATER), true, OwnershipMap.OWN, Double.MAX_VALUE);
     }

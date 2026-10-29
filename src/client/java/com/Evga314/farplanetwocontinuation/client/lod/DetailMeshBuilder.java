@@ -448,6 +448,7 @@ final class DetailMeshBuilder {
             ByteBuffer vertices = out.finish();
             int[] segments = out.segments();
             int[] chunkPlants = extras ? out.plantStarts() : null;
+            float[] detailEdges = this.edgeProfiles(cellsPerChunk, chunksPerSide);
             float minY = out.minY;
             float maxY = out.maxY;
             if (minY > maxY) {
@@ -456,8 +457,87 @@ final class DetailMeshBuilder {
             }
             return new GeneralMeshFactory.Built(
                 key, epoch, vertices, minY, maxY, minY, null, out.quads * 6, true, coverage(this.data, this.cell), this.data.isComplete(), segments,
-                    chunkSurfaces, this.detail.textured(), out.water, chunkPlants, out.cutout, null, null, null, null, null
+                    chunkSurfaces, this.detail.textured(), out.water, chunkPlants, out.cutout, null, null, null, null, null, detailEdges
             );
+        }
+
+        /**
+         * The surface along the edges of the tile's chunks, kept for the border seam (see BorderSeam): per chunk and side, per
+         * cell along the side, the ground of the cell's column and the level of its water (NaN where there is none), two floats
+         * each. The ground is the top of the first segment from the top that is ground - not water, not a plant, not what stands
+         * in the water - with the top block's own height where the ground is the top block, as the faces are drawn; a column of
+         * nothing but water bottoms out at the bottom of the world. Cells without data keep NaN.
+         * <p>
+         * Поверхность вдоль кромок чанков тайла, сохраняется для пограничного шва (см. BorderSeam): на чанк и сторону, на ячейку
+         * вдоль стороны - земля колонки ячейки и уровень её воды (NaN, где воды нет), по два float. Земля - верх первого сверху
+         * сегмента, который земля: не вода, не растение и не то, что стоит в воде; где земля - верхний блок, с его собственной
+         * высотой, как рисуются грани; колонка из одной воды упирается в дно мира. Ячейки без данных остаются NaN.
+         */
+        private float[] edgeProfiles(int cellsPerChunk, int chunksPerSide) {
+            DetailData data = this.data;
+            float[] edges = new float[chunksPerSide * chunksPerSide * 4 * cellsPerChunk * 2];
+            Arrays.fill(edges, Float.NaN);
+            for (int cz = 0; cz < CELLS; cz++) {
+                for (int cx = 0; cx < CELLS; cx++) {
+                    int localX = cx % cellsPerChunk;
+                    int localZ = cz % cellsPerChunk;
+                    boolean west = localX == 0;
+                    boolean east = localX == cellsPerChunk - 1;
+                    boolean north = localZ == 0;
+                    boolean south = localZ == cellsPerChunk - 1;
+                    if (!west && !east && !north && !south) {
+                        continue;
+                    }
+                    int cell = cx + cz * CELLS;
+                    float ground = Float.NaN;
+                    float water = Float.NaN;
+                    int count = data.segCounts[cell];
+                    if (count > 0) {
+                        int cursor = data.stackTops[cell];
+                        int offset = data.segOffsets[cell];
+                        for (int s = 0; s < count; s++) {
+                            int blockTop = cursor;
+                            cursor -= data.segHeights[offset + s];
+                            int block = this.block(offset + s);
+                            byte kind = this.kinds[block];
+                            if (kind == LIQUID) {
+                                if (this.water[block] && Float.isNaN(water)) {
+                                    water = blockTop - 1.0F / 9.0F;
+                                }
+                                continue;
+                            }
+                            if (kind == SOLID || kind == CLEAR) {
+                                ground = s == 0 ? blockTop - 1.0F + (data.fractions[cell] & 0xFF) / 16.0F : blockTop;
+                                break;
+                            }
+                        }
+                        if (Float.isNaN(ground)) {
+                            ground = data.minY;
+                        }
+                    }
+                    int chunk = cx / cellsPerChunk + cz / cellsPerChunk * chunksPerSide;
+                    if (west) {
+                        putEdge(edges, chunk, 2, localZ, cellsPerChunk, ground, water);
+                    }
+                    if (east) {
+                        putEdge(edges, chunk, 3, localZ, cellsPerChunk, ground, water);
+                    }
+                    if (north) {
+                        putEdge(edges, chunk, 0, localX, cellsPerChunk, ground, water);
+                    }
+                    if (south) {
+                        putEdge(edges, chunk, 1, localX, cellsPerChunk, ground, water);
+                    }
+                }
+            }
+            return edges;
+        }
+
+        /** One point of a kept edge: its ground and its water into the array of {@link #edgeProfiles}. / Одна точка сохранённой кромки: её земля и её вода в массив из {@link #edgeProfiles}. */
+        private static void putEdge(float[] edges, int chunk, int side, int i, int per, float ground, float water) {
+            int at = ((chunk * 4 + side) * per + i) * 2;
+            edges[at] = ground;
+            edges[at + 1] = water;
         }
 
         /** Heights and paints of every segment of the tile's cells, before any quad is written. */

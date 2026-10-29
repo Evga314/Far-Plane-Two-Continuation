@@ -54,9 +54,9 @@ public final class GeneralMeshFactory {
             long key, int epoch, @Nullable ByteBuffer vertices, float minY, float maxY, float terrainMinY, short @Nullable [] heights, int indexCount,
             boolean detail, long coverage, boolean complete, int @Nullable [] segments, int @Nullable [] chunkSurfaces, boolean textured,
             boolean hasWater, int @Nullable [] chunkPlants, boolean hasCutout,
-            com.Evga314.farplanetwocontinuation.client.lod.surface.@Nullable SurfaceTile surface, int @Nullable [] seamHeights, int @Nullable [] seamColors, byte @Nullable [] seamBits, int @Nullable [] seamSkirts    ) {
+            com.Evga314.farplanetwocontinuation.client.lod.surface.@Nullable SurfaceTile surface, int @Nullable [] seamHeights, int @Nullable [] seamColors, byte @Nullable [] seamBits, int @Nullable [] seamSkirts, float @Nullable [] detailEdges    ) {
         /** A tile whose data could not be used; it is dropped quietly. */
         static Built failed(long key, int epoch) {
-            return new Built(key, epoch, null, 0.0F, 0.0F, 0.0F, null, 0, false, 0L, false, null, null, false, false, null, false, null, null, null, null, null);        }
+            return new Built(key, epoch, null, 0.0F, 0.0F, 0.0F, null, 0, false, 0L, false, null, null, false, false, null, false, null, null, null, null, null, null);        }
     }
 }

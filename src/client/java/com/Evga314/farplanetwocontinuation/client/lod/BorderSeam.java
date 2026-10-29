@@ -30,17 +30,21 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The seam between vanilla's chunks and the rough terrain: a strip of triangles sewn into the wedge between the two surfaces along
- * the border of what vanilla draws (see {@link OwnershipMap}), so no sky shows through where the rough surface ends lower or higher
- * than vanilla's edge. One side of the strip follows the rough tile's own edge samples exactly as they are drawn, the other follows
- * vanilla's edge column by column; where the two profiles meet, the strip's triangles shrink to nothing. It is sewn again only when
+ * The seam between the rough terrain and what borders it - vanilla's chunks on one side, the detailed tiles on the other: a strip
+ * of triangles sewn into the wedge between the two surfaces along the border (see {@link OwnershipMap}), so no sky shows through
+ * where the rough surface ends lower or higher than its neighbour's edge. One side of the strip follows the rough tile's own edge
+ * samples exactly as they are drawn, the other follows the neighbour's edge column by column - read from vanilla's chunks while
+ * they are there, or from what a detailed tile kept of its chunks' edges (see {@code TileMesh.detailEdges}); where the two
+ * profiles meet, the strip's triangles shrink to nothing. It is sewn again only when
  * the border or the tiles along it change (and now and then besides, in case a border chunk was edited), and drawn by every output:
  * with the surface pipelines in {@link LodVertex} format, and with a shader pack in the pack's format (see IrisOutput).
  * <p>
- * Шов между чанками ваниллы и дальним ландшафтом: полоса треугольников, вшитая в клин между двумя поверхностями вдоль границы того,
- * что рисует ванилла (см. {@link OwnershipMap}), чтобы небо не просвечивало там, где грубая поверхность обрывается ниже или выше
- * кромки ваниллы. Одна сторона полосы идёт точно по кромочным отсчётам грубого тайла, как они нарисованы, другая - по кромке ваниллы
- * колонка за колонкой; где профили сходятся, треугольники полосы вырождаются в ноль. Перешивается только когда меняется граница или
+ * Шов между дальним ландшафтом и тем, что с ним граничит, - чанками ваниллы с одной стороны, детальными тайлами с другой: полоса
+ * треугольников, вшитая в клин между двумя поверхностями вдоль границы (см. {@link OwnershipMap}), чтобы небо не просвечивало там,
+ * где грубая поверхность обрывается ниже или выше кромки соседа. Одна сторона полосы идёт точно по кромочным отсчётам грубого тайла,
+ * как они нарисованы, другая - по кромке соседа колонка за колонкой: читается из чанков ваниллы, пока они есть, или из того, что
+ * детальный тайл сохранил от кромок своих чанков (см. {@code TileMesh.detailEdges}); где профили сходятся, треугольники полосы
+ * вырождаются в ноль. Перешивается только когда меняется граница или
  * тайлы вдоль неё (и время от времени просто так, на случай правки приграничного чанка), а рисуется всеми выходами: конвейерами
  * поверхности в формате {@link LodVertex}, а с шейдерным паком - в формате пака (см. IrisOutput).
  * <p>
@@ -50,6 +54,14 @@ final class BorderSeam implements AutoCloseable {
     // Directions of a chunk's sides: +x, -x, +z, -z, as in VanillaWall. / Направления сторон чанка: +x, -x, +z, -z, как в VanillaWall.
     private static final int[] SIDE_X = {1, -1, 0, 0};
     private static final int[] SIDE_Z = {0, 0, 1, -1};
+    /**
+     * The side of the neighbouring chunk that faces the seam's chunk, by the direction to the neighbour, in the side numbering
+     * {@link DetailMeshBuilder} keeps a detailed tile's chunk edges in (north, south, west, east): east of us its west side
+     * faces us, and so on. / Сторона соседнего чанка, обращённая к чанку шва, по направлению к соседу, в нумерации сторон, в
+     * которой {@link DetailMeshBuilder} хранит кромки чанков детального тайла (север, юг, запад, восток): от восточного соседа к
+     * нам обращена его западная сторона, и так далее.
+     */
+    private static final int[] OTHER_SIDE = {2, 3, 0, 1};
     /**
      * How far the seam's plane is shifted towards the rough terrain, and how far its ends reach past their ends along the border:
      * where two surfaces only met in one plane, a pixel right on their shared line was now and then covered by neither (the same
@@ -182,7 +194,7 @@ final class BorderSeam implements AutoCloseable {
     private long lastScanMs;
 
     // Scratch of one sewing, kept between sewings. / Черновик одного шитья, хранится между шитьями.
-    /** Per segment found: the chunk, the direction to vanilla, and the tile of the frame's list that draws the chunk; four each. / На найденный отрезок: чанк, направление к ванилле и тайл из списка кадра, который рисует чанк; по четыре. */
+    /** Per segment found: the chunk, the direction to the neighbour, the tile of the frame's list that draws the chunk, and the detailed tile it sews to or -1 for vanilla; five each. / На найденный отрезок: чанк, направление к соседу, тайл из списка кадра, который рисует чанк, и детальный тайл, к которому он шьётся, или -1 для ваниллы; по пять. */
     private int[] segDesc = new int[256];
     private int segCount;
     /** The points of the seam: their place in the world, the level of their water, their color and material, and the way the rough terrain lies from their segment. / Точки шва: их место в мире, уровень их воды, их цвет и материал и сторона, с которой от их отрезка лежит дальний ландшафт. */
@@ -211,10 +223,13 @@ final class BorderSeam implements AutoCloseable {
     private final float[] vanT = new float[33];
     private final float[] vanY = new float[33];
     private final float[] vanWl = new float[33];
-    /** How many points the step profile of the segment being sewn has, and the ground and water of its columns before the expansion. / Сколько точек у ступенчатого профиля отрезка в работе, и земля с водой его колонок до разворота. */
+    /** How many points the step profile of the segment being sewn has, and where each of its columns starts along the border and the ground and water of its columns, before the expansion. / Сколько точек у ступенчатого профиля отрезка в работе, и где вдоль границы начинается каждая из его колонок, и земля с водой его колонок до разворота. */
     private int vanCount;
+    private final float[] colT = new float[17];
     private final float[] colY = new float[17];
     private final float[] colWl = new float[17];
+    /** The frame's detailed tiles the seam may sew to, handed over by {@link #update} and read only while sewing. / Детальные тайлы кадра, к которым шов может шиться; передаются из {@link #update} и читаются только во время шитья. */
+    private List<TileMesh> detailTiles = List.of();
     /** The vanilla chunks read in this sewing, so a chunk bordering the seam on two sides is read once. / Чанки ваниллы, прочитанные в этом шитье, чтобы чанк, граничащий со швом с двух сторон, читался один раз. */
     private final Long2ObjectOpenHashMap<ChunkAccess> chunkCache = new Long2ObjectOpenHashMap<>();
     private final BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
@@ -244,8 +259,9 @@ final class BorderSeam implements AutoCloseable {
      * Перешивает шов, когда изменилось то, из чего он шьётся, и пишет его блок тайла на этот кадр. Вызывается из
      * {@link FrameDrawList#prepare} с тайлами кадра и тем, что каждый из них рисует от своих чанков-колонок.
      */
-    void update(@Nullable ClientLevel level, OwnershipMap ownership, List<TileMesh> tiles, byte[][] parts, double camX, double camY, double camZ) {
+    void update(@Nullable ClientLevel level, OwnershipMap ownership, List<TileMesh> tiles, byte[][] parts, List<TileMesh> detailTiles, double camX, double camY, double camZ) {
         this.blockSlice = null;
+        this.detailTiles = detailTiles;
         if (level == null || ownership.half() < 0) {
             this.empty = true;
             this.builtVersion = -1;
@@ -257,7 +273,7 @@ final class BorderSeam implements AutoCloseable {
         if (ownership.version() != this.builtVersion || due) {
             this.lastScanMs = now;
             this.builtVersion = ownership.version();
-            long print = this.scan(ownership, tiles, parts);
+            long print = this.scan(ownership, tiles, parts, detailTiles);
             if (print != this.builtPrint || due && this.incomplete) {
                 this.builtPrint = print;
                 this.build(level, tiles);
@@ -275,7 +291,7 @@ final class BorderSeam implements AutoCloseable {
 
     /**
      * Finds the segments of the seam: the chunk columns the rough terrain draws as its own, with vanilla next door, settled or
-     * being handed over this very frame. For
+     * being handed over this very frame, or with a detailed tile next door. For
      * every one, the tile of the frame that draws the column at the finest level there, or none (the segment is then left out: a
      * tile still loading shows the usual pop-in, not a hole sewn to nothing). Returns a print of the segments and their tiles.
      * <p>
@@ -283,12 +299,13 @@ final class BorderSeam implements AutoCloseable {
      * тайл кадра, который рисует колонку на самом подробном уровне там, или никакой (тогда отрезок пропускается: ещё строящийся тайл
      * показывает обычный поп-ин, а не дыру, пришитую к пустоте). Возвращает отпечаток отрезков и их тайлов.
      */
-    private long scan(OwnershipMap ownership, List<TileMesh> tiles, byte[][] parts) {
+    private long scan(OwnershipMap ownership, List<TileMesh> tiles, byte[][] parts, List<TileMesh> detailTiles) {
         this.segCount = 0;
         HashMap<Long, Integer> byPos = new HashMap<>();
         for (int i = 0; i < tiles.size(); i++) {
             byPos.put(tiles.get(i).pos.pack(), i);
         }
+        HashMap<Long, Integer> detailByChunk = null;
         long print = 0x5EEDL + ownership.version();
         int half = ownership.half();
         int side = 2 * half + 1;
@@ -308,28 +325,50 @@ final class BorderSeam implements AutoCloseable {
                     // простояла HANDOVER_MS: клин вдоль её кромки открыт с этого кадра, и шов закрывает его в том же кадре.
                     // Сама карта питается покадрово тем, что рисует Sodium (см. LodManager.frameCheck и SodiumFrame), поэтому
                     // ожидания в шов не встроено.
-                    byte neighbour = ownership.owner(cx + SIDE_X[dir], cz + SIDE_Z[dir]);
-                    if (neighbour != OwnershipMap.VANILLA && neighbour != OwnershipMap.HANDOVER) {
+                    int nx = cx + SIDE_X[dir];
+                    int nz = cz + SIDE_Z[dir];
+                    byte neighbour = ownership.owner(nx, nz);
+                    int detailIndex = -1;
+                    if (neighbour == OwnershipMap.DETAILED) {
+                        // A detailed tile next door: the seam sews to the tile the frame draws for that chunk, the finest
+                        // there; a chunk no drawn tile covers is left out, as a rough chunk without a tile is.
+                        // / Детальный тайл по соседству: шов шьётся к тайлу, который кадр рисует для этого чанка, самому
+                        // подробному там; чанк, который не покрывает ни один рисуемый тайл, пропускается, как грубый чанк без тайла.
+                        if (detailByChunk == null) {
+                            detailByChunk = indexDetailTiles(detailTiles);
+                        }
+                        Integer found = detailByChunk.get(ChunkPos.pack(nx, nz));
+                        if (found == null) {
+                            continue;
+                        }
+                        detailIndex = found;
+                    } else if (neighbour != OwnershipMap.VANILLA && neighbour != OwnershipMap.HANDOVER) {
                         continue;
                     }
                     int tile = this.covering(byPos, tiles, parts, cx, cz);
                     if (tile < 0) {
                         continue;
                     }
-                    if (this.segCount * 4 + 4 > this.segDesc.length) {
+                    if (this.segCount * 5 + 5 > this.segDesc.length) {
                         int[] grown = new int[this.segDesc.length * 2];
                         System.arraycopy(this.segDesc, 0, grown, 0, this.segDesc.length);
                         this.segDesc = grown;
                     }
-                    int at = this.segCount * 4;
+                    int at = this.segCount * 5;
                     this.segDesc[at] = cx;
                     this.segDesc[at + 1] = cz;
                     this.segDesc[at + 2] = dir;
                     this.segDesc[at + 3] = tile;
+                    this.segDesc[at + 4] = detailIndex;
                     this.segCount++;
                     TileMesh mesh = tiles.get(tile);
                     print = print * 31L + mesh.pos.pack();
                     print = print * 31L + mesh.vertices.offset;
+                    if (detailIndex >= 0) {
+                        TileMesh detailMesh = detailTiles.get(detailIndex);
+                        print = print * 31L + detailMesh.pos.pack();
+                        print = print * 31L + detailMesh.vertices.offset;
+                    }
                 }
             }
         }
@@ -363,6 +402,33 @@ final class BorderSeam implements AutoCloseable {
         return -1;
     }
 
+    /**
+     * The frame's detailed tiles by the chunks they cover: for every chunk the finest tile covering it, as the detailed layer
+     * itself draws the finest over the coarser ones.
+     * <p>
+     * Детальные тайлы кадра по чанкам, которые они покрывают: для каждого чанка - самый подробный тайл, который его покрывает,
+     * как сам детальный слой рисует подробные поверх более грубых.
+     */
+    private static HashMap<Long, Integer> indexDetailTiles(List<TileMesh> detailTiles) {
+        HashMap<Long, Integer> byChunk = new HashMap<>();
+        for (int i = 0; i < detailTiles.size(); i++) {
+            TileMesh mesh = detailTiles.get(i);
+            int chunks = mesh.pos.size() / 16;
+            int baseX = (int) (mesh.pos.minX() / 16L);
+            int baseZ = (int) (mesh.pos.minZ() / 16L);
+            for (int gz = 0; gz < chunks; gz++) {
+                for (int gx = 0; gx < chunks; gx++) {
+                    long key = ChunkPos.pack(baseX + gx, baseZ + gz);
+                    Integer known = byChunk.get(key);
+                    if (known == null || detailTiles.get(known).pos.level() > mesh.pos.level()) {
+                        byChunk.put(key, i);
+                    }
+                }
+            }
+        }
+        return byChunk;
+    }
+
     /** Sews the segments {@link #scan} found into points and triangles, and puts them on the GPU in both formats. / Шьёт отрезки, найденные {@link #scan}, в точки и треугольники и кладёт их на видеокарту в обоих форматах. */
     private void build(ClientLevel level, List<TileMesh> tiles) {
         this.points = 0;
@@ -375,8 +441,9 @@ final class BorderSeam implements AutoCloseable {
         this.maxWZ = -Float.MAX_VALUE;
         boolean dropped = false;
         for (int s = 0; s < this.segCount; s++) {
-            int at = s * 4;
-            dropped |= !this.segment(level, tiles.get(this.segDesc[at + 3]), this.segDesc[at], this.segDesc[at + 1], this.segDesc[at + 2]);
+            int at = s * 5;
+            TileMesh detailMesh = this.segDesc[at + 4] >= 0 ? this.detailTiles.get(this.segDesc[at + 4]) : null;
+            dropped |= !this.segment(level, tiles.get(this.segDesc[at + 3]), this.segDesc[at], this.segDesc[at + 1], this.segDesc[at + 2], detailMesh);
         }
         this.incomplete = dropped;
         if (this.points == 0) {
@@ -410,52 +477,71 @@ final class BorderSeam implements AutoCloseable {
     }
 
     /**
-     * One segment of the seam, along one side of chunk {@code cx, cz} whose neighbour in direction {@code dir} is vanilla's: the
-     * zipper between our profile (the tile's samples along the side) and vanilla's (its edge, block by block).
+     * One segment of the seam, along one side of chunk {@code cx, cz} whose neighbour in direction {@code dir} is vanilla's (a
+     * null {@code detailMesh}) or a detailed tile's: the zipper between our profile (the tile's samples along the side) and the
+     * neighbour's (its edge, column by column).
      * <p>
-     * Один отрезок шва вдоль одной стороны чанка {@code cx, cz}, чей сосед в направлении {@code dir} - ванилла: молния между нашим
-     * профилем (отсчёты тайла вдоль стороны) и профилем ваниллы (её кромка, блок за блоком).
+     * Один отрезок шва вдоль одной стороны чанка {@code cx, cz}, чей сосед в направлении {@code dir} - ванилла ({@code detailMesh}
+     * равен null) или детальный тайл: молния между нашим профилем (отсчёты тайла вдоль стороны) и профилем соседа (его кромка,
+     * колонка за колонкой).
      */
-    private boolean segment(ClientLevel level, TileMesh mesh, int cx, int cz, int dir) {
-        ChunkAccess chunk = this.chunk(level, cx + SIDE_X[dir], cz + SIDE_Z[dir]);
-        if (chunk == null) {
-            return false;
-        }
+    private boolean segment(ClientLevel level, TileMesh mesh, int cx, int cz, int dir, @Nullable TileMesh detailMesh) {
         boolean xEdge = SIDE_X[dir] != 0;
         float planeX = (cx + (SIDE_X[dir] > 0 ? 1 : 0)) * 16.0F - SIDE_X[dir] * OVERLAP;
         float planeZ = (cz + (SIDE_Z[dir] > 0 ? 1 : 0)) * 16.0F - SIDE_Z[dir] * OVERLAP;
-        // Vanilla's profile: the ground of every column along its edge, then the columns opened out into the true step profile:
+        // The neighbour's profile: the ground of every column along its edge - vanilla's read from its chunk, a detailed
+        // tile's from what it kept of the chunk's edge - then the columns opened out into the true step profile:
         // across a column its top runs level, at the column's far side it jumps straight to the next column's top. Joining the
         // column tops corner to corner instead left a diagonal over every rising step, and under the diagonal a triangle of sky
         // the width of one block and the height of the step.
-        // / Профиль ваниллы: земля каждой колонки вдоль её кромки, затем колонки разворачиваются в настоящий ступенчатый
+        // / Профиль соседа: земля каждой колонки вдоль её кромки - у ваниллы читается из её чанка, у детального тайла из того,
+        // что он сохранил от кромки чанка, - затем колонки разворачиваются в настоящий ступенчатый
         // профиль: поперёк колонки её верх идёт ровно, у дальнего края колонки прыгает прямо к верху следующей. Соединение
         // верхов колонок угол к углу вместо этого оставляло диагональ над каждой восходящей ступенькой, а под диагональю -
         // треугольник неба шириной в один блок и высотой в ступеньку.
-        for (int k = 0; k < 16; k++) {
-            int localX;
-            int localZ;
-            if (xEdge) {
-                localX = SIDE_X[dir] > 0 ? 0 : 15;
-                localZ = k;
-            } else {
-                localZ = SIDE_Z[dir] > 0 ? 0 : 15;
-                localX = k;
+        int n;
+        if (detailMesh != null) {
+            n = this.detailSide(detailMesh, cx + SIDE_X[dir], cz + SIDE_Z[dir], dir);
+            if (n == 0) {
+                // The tile kept no edge for this chunk - its data is missing along it and nothing is drawn there to sew to;
+                // not a gap in the sewing, so the segment does not count as dropped.
+                // / Тайл не сохранил кромку для этого чанка - его данных вдоль неё нет, и шиться там не к чему; это не пропуск
+                // в шитье, поэтому отрезок не считается пропущенным.
+                return true;
             }
-            this.vanillaColumn(level, chunk, localX, localZ, k);
+        } else {
+            ChunkAccess chunk = this.chunk(level, cx + SIDE_X[dir], cz + SIDE_Z[dir]);
+            if (chunk == null) {
+                return false;
+            }
+            for (int k = 0; k < 16; k++) {
+                int localX;
+                int localZ;
+                if (xEdge) {
+                    localX = SIDE_X[dir] > 0 ? 0 : 15;
+                    localZ = k;
+                } else {
+                    localZ = SIDE_Z[dir] > 0 ? 0 : 15;
+                    localX = k;
+                }
+                this.vanillaColumn(level, chunk, localX, localZ, k);
+                this.colT[k] = k;
+            }
+            this.colT[16] = 16.0F;
+            n = 16;
         }
         int m = 0;
-        this.vanT[m] = 0.0F;
+        this.vanT[m] = this.colT[0];
         this.vanY[m] = this.colY[0];
         this.vanWl[m] = this.colWl[0];
         m++;
-        for (int k = 0; k < 16; k++) {
-            this.vanT[m] = k + 1.0F;
+        for (int k = 0; k < n; k++) {
+            this.vanT[m] = this.colT[k + 1];
             this.vanY[m] = this.colY[k];
             this.vanWl[m] = this.colWl[k];
             m++;
-            if (k < 15) {
-                this.vanT[m] = k + 1.0F;
+            if (k < n - 1) {
+                this.vanT[m] = this.colT[k + 1];
                 this.vanY[m] = this.colY[k + 1];
                 this.vanWl[m] = this.colWl[k + 1];
                 m++;
@@ -616,6 +702,57 @@ final class BorderSeam implements AutoCloseable {
             }
         }
         return true;
+    }
+
+    /**
+     * The profile of a detailed tile's chunk along the side that faces the seam's chunk, into {@link #colT}, {@link #colY} and
+     * {@link #colWl}: one column per cell of the tile along the side, each as wide as a cell, from what the tile kept of its
+     * chunks' edges (see {@code TileMesh.detailEdges}). A column the tile has no data for takes the nearest column it has; a
+     * side with no data at all gives 0.
+     * <p>
+     * Профиль чанка детального тайла вдоль стороны, обращённой к чанку шва, в {@link #colT}, {@link #colY} и {@link #colWl}: по
+     * одной колонке на ячейку тайла вдоль стороны, каждая шириной в ячейку, из того, что тайл сохранил от кромок своих чанков
+     * (см. {@code TileMesh.detailEdges}). Колонка, на которую у тайла нет данных, берёт ближайшую колонку, которая есть; сторона
+     * совсем без данных даёт 0.
+     */
+    private int detailSide(TileMesh mesh, int chunkX, int chunkZ, int dir) {
+        float[] edges = mesh.detailEdges;
+        if (edges == null) {
+            return 0;
+        }
+        int cell = 1 << (mesh.pos.level() - 1);
+        int per = 16 / cell;
+        int chunksPerSide = FarPlaneConstants.DETAIL_CELLS / per;
+        int localX = chunkX - (int) (mesh.pos.minX() / 16L);
+        int localZ = chunkZ - (int) (mesh.pos.minZ() / 16L);
+        if (localX < 0 || localZ < 0 || localX >= chunksPerSide || localZ >= chunksPerSide) {
+            return 0;
+        }
+        int base = ((localX + localZ * chunksPerSide) * 4 + OTHER_SIDE[dir]) * per;
+        int first = -1;
+        for (int k = 0; k < per; k++) {
+            if (!Float.isNaN(edges[(base + k) * 2])) {
+                first = k;
+                break;
+            }
+        }
+        if (first < 0) {
+            return 0;
+        }
+        float ground = edges[(base + first) * 2];
+        float water = edges[(base + first) * 2 + 1];
+        for (int k = 0; k < per; k++) {
+            float g = edges[(base + k) * 2];
+            if (!Float.isNaN(g)) {
+                ground = g;
+                water = edges[(base + k) * 2 + 1];
+            }
+            this.colT[k] = k * (float) cell;
+            this.colY[k] = ground;
+            this.colWl[k] = Float.isNaN(water) ? ground : water;
+        }
+        this.colT[per] = 16.0F;
+        return per;
     }
 
     /** A vanilla chunk the seam borders, read once a sewing; null while it is not there. / Чанк ваниллы, с которым граничит шов, читается раз за шитье; null, пока его нет. */

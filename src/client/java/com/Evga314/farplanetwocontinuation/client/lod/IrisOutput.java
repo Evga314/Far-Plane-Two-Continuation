@@ -326,6 +326,28 @@ final class IrisOutput implements IrisGlue.Bridge {
                 }
             }
         }
+        if (!water) {
+            // The border seam, in the pack's format like the tiles; its indices are ints, as it is one mesh for the whole border.
+            // / Пограничный шов, в формате пака, как тайлы; его индексы - int, потому что он один меш на всю границу.
+            BorderSeam.PackMesh seam = list.seamPack();
+            if (seam != null && seam.buffer() instanceof GlBuffer seamBuffer) {
+                GL20C.glUniform3f(program.modelOffsetUniform, (float) (seam.originX() - camX), (float) (seam.baseY() - camY),
+                        (float) (seam.originZ() - camZ));
+                int handle = seamBuffer.handle();
+                if (handle != bound) {
+                    GlStateManager._glBindBuffer(GL15C.GL_ARRAY_BUFFER, handle);
+                    GlStateManager._glBindBuffer(GL15C.GL_ELEMENT_ARRAY_BUFFER, handle);
+                    bound = handle;
+                }
+                GlStateManager._vertexAttribIPointer(0, 4, GL11C.GL_UNSIGNED_SHORT, PackMesher.SIZE, 0L);
+                GlStateManager._vertexAttribPointer(1, 4, GL11C.GL_UNSIGNED_BYTE, true, PackMesher.SIZE, PackMesher.COLOR);
+                GlStateManager._vertexAttribIPointer(2, 4, GL11C.GL_UNSIGNED_BYTE, PackMesher.SIZE, PackMesher.EXTRA);
+                GL11C.glDrawElements(GL11C.GL_TRIANGLES, seam.indexCount(), GL11C.GL_UNSIGNED_INT, seam.vertexBytes());
+                if (PerfLog.ON) {
+                    PerfLog.draw(seam.indexCount());
+                }
+            }
+        }
         program.unbind();
     }
 

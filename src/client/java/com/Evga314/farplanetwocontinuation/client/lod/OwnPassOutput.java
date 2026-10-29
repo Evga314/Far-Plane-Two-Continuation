@@ -26,6 +26,7 @@ final class OwnPassOutput {
 
     void drawGround(RenderPass pass) {
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.GROUND), false, OwnershipMap.OWN, Double.MAX_VALUE);
+        this.drawList.drawSeam(pass, this.compile.apply(SurfacePipelines.GROUND));
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.RING), false, OwnershipMap.BACKGROUND, Double.MAX_VALUE);
     }
 
@@ -37,5 +38,6 @@ final class OwnPassOutput {
     /** The ground's depth for vanilla, of the tiles within {@code distance} of the camera, see surface_depth.fsh. */
     void drawDepth(RenderPass pass, double distance) {
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.DEPTH), false, OwnershipMap.OWN, distance);
+        this.drawList.drawSeam(pass, this.compile.apply(SurfacePipelines.DEPTH));
     }
 }

@@ -110,6 +110,8 @@ final class FrameDrawList implements AutoCloseable {
     private final ArrayList<TileMesh> tiles = new ArrayList<>();
     private byte[][] parts = new byte[0][];
     private final OwnershipMap ownership = new OwnershipMap();
+    /** The seam sewn along the border of vanilla's columns, see BorderSeam. / Шов, сшитый вдоль границы колонок ваниллы, см. BorderSeam. */
+    private final BorderSeam seam = new BorderSeam();
     private boolean[] vanillaColumns = new boolean[0];
     private boolean[] detailedColumns = new boolean[0];
     /** The ring's buffer, see {@link #ringInfo}, and the version of the map each of its three buffers holds. */
@@ -141,6 +143,7 @@ final class FrameDrawList implements AutoCloseable {
         if (this.frames == null) {
             this.frames = new DynamicGpuDataStorageMapped<>("FarPlane surface frame", FrameData.SIZE, GpuBuffer.USAGE_UNIFORM, 1);
             this.tileStorage = new DynamicGpuDataStorageMapped<>("FarPlane surface tiles", TileData.SIZE, GpuBuffer.USAGE_UNIFORM, 128);
+            this.seam.beginFrame();
         }
         this.frames.endFrame();
         this.tileStorage.endFrame();
@@ -206,6 +209,7 @@ final class FrameDrawList implements AutoCloseable {
             }
             this.parts(mesh, mask, camY, this.parts[i]);
         }
+        this.seam.update(Minecraft.getInstance().level, this.ownership, this.tiles, this.parts, camX, camY, camZ);
         this.tileSlices = this.tileStorage.writeData(written);
     }
 
@@ -452,7 +456,36 @@ final class FrameDrawList implements AutoCloseable {
         }
         return draws;
     }
+    /** The border seam's mesh for a shader pack, see BorderSeam. / Меш пограничного шва для шейдерного пака, см. BorderSeam. */
+    BorderSeam.@Nullable PackMesh seamPack() {
+        return this.seam.packMesh();
+    }
 
+    /**
+     * Draws the border seam (see BorderSeam) with one of the surface's pipelines, the ground's or the depth's: for the pass the
+     * seam is one more tile, with its own buffers and its own tile block.
+     * <p>
+     * Рисует пограничный шов (см. BorderSeam) одним из конвейеров поверхности, земли или глубины: для прохода шов - ещё один тайл,
+     * со своими буферами и своим блоком тайла.
+     */
+    void drawSeam(RenderPass pass, @Nullable CompiledRenderPipeline pipeline) {
+        GpuBufferSlice slice = this.seam.blockSlice();
+        GpuBufferSlice vertices = this.seam.ownVertices();
+        GpuBuffer buffer = this.seam.ownBuffer();
+        if (pipeline == null || this.frameSlice == null || slice == null || vertices == null || buffer == null || !this.seam.hasMesh()) {
+            return;
+        }
+        pass.setPipeline(pipeline);
+        pass.setUniform("SurfaceFrame", this.frameSlice);
+        pass.setUniform("Sampler2", Minecraft.getInstance().gameRenderer.levelLightmap(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
+        pass.setUniform("SurfaceTile", slice);
+        pass.setVertexBuffer(0, vertices);
+        pass.setIndexBuffer(buffer, IndexType.INT);
+        pass.drawIndexed(this.seam.ownIndexCount(), 1, this.seam.ownFirstIndex(), 0, 0);
+        if (PerfLog.ON) {
+            PerfLog.draw(this.seam.ownIndexCount());
+        }
+    }
     private boolean separateMultiDraw() {
         if (this.separateMultiDraw == 0) {
             this.separateMultiDraw = RenderSystem.getDevice().getDeviceInfo().features().multiDrawDirectSeparate() ? 1 : 2;
@@ -489,6 +522,7 @@ final class FrameDrawList implements AutoCloseable {
                 this.groundIndices[i] = null;
             }
         }
+        this.seam.close();
         MemoryUtil.memFree(this.offsets);
         MemoryUtil.memFree(this.counts);
         MemoryUtil.memFree(this.baseVertices);

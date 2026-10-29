@@ -44,6 +44,10 @@ final class TileMesh implements AutoCloseable {
     final boolean hasCutout;
     /** Rough tiles of the new renderer: where their parts lie in {@link #vertices}, see OwnPassOutput. Null for the old mesh. */
     final com.Evga314.farplanetwocontinuation.client.lod.surface.@Nullable SurfaceTile surface;
+    /** Rough tiles: what their samples keep for the border seam, see BorderSeam. / Грубые тайлы: что их отсчёты хранят для пограничного шва, см. BorderSeam. */
+    final int @Nullable [] seamHeights;
+    final int @Nullable [] seamColors;
+    final byte @Nullable [] seamBits;
     /** Rough tiles: lowest ground of each part of the tile, for {@link Horizon}. */
     final float @Nullable [] partLows;
     /** Hidden behind terrain this tick, see {@link Horizon}. */
@@ -106,6 +110,9 @@ final class TileMesh implements AutoCloseable {
         this.hasWater = built.hasWater();
         this.hasCutout = built.hasCutout();
         this.surface = built.surface();
+        this.seamHeights = built.seamHeights();
+        this.seamColors = built.seamColors();
+        this.seamBits = built.seamBits();
         this.partLows = !built.detail() && built.heights() != null ? Horizon.partLows(built.heights()) : null;
     }
 

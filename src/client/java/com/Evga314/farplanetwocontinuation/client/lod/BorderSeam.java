@@ -625,6 +625,20 @@ final class BorderSeam implements AutoCloseable {
         boolean xEdge = SIDE_X[dir] != 0;
         float planeX = (cx + (SIDE_X[dir] > 0 ? 1 : 0)) * 16.0F - SIDE_X[dir] * OVERLAP;
         float planeZ = (cz + (SIDE_Z[dir] > 0 ? 1 : 0)) * 16.0F - SIDE_Z[dir] * OVERLAP;
+        // The neighbour's side of the strip stands in the border's plane exactly, without the shift: its top edge then meets
+        // the neighbour's blocks at their own top corners, edge to edge. Shifted back with the rest of the strip it ended at
+        // the same heights but a step behind the blocks' faces, and from any viewpoint a little under the edge the sight line
+        // slipped between the block and the strip - a hairline of fog along the whole perimeter of the vanilla blocks. The
+        // strip only touches the blocks' faces along that edge, never across an area, so the two do not flicker; our side
+        // keeps its shift, which is what keeps it off the skirt's plane.
+        // / Сторона полосы у соседа стоит ровно в плоскости границы, без сдвига: её верхняя кромка тогда встречается с
+        // блоками соседа на их собственных верхних углах, кромка к кромке. Сдвинутая назад вместе с остальной полосой, она
+        // заканчивалась на тех же высотах, но на шаг позади граней блоков, и с любой точки зрения чуть ниже кромки луч
+        // зрения проскальзывал между блоком и полосой - волосная линия тумана по всему периметру ванильных блоков. Граней
+        // блоков полоса касается только вдоль той кромки, никогда по площади, поэтому они не мерцают; наша сторона свой
+        // сдвиг сохраняет - он и держит её вне плоскости юбки.
+        float vanPlaneX = (cx + (SIDE_X[dir] > 0 ? 1 : 0)) * 16.0F;
+        float vanPlaneZ = (cz + (SIDE_Z[dir] > 0 ? 1 : 0)) * 16.0F;
         // The neighbour's profile: the ground of every column along its edge - vanilla's read from its chunk, a detailed
         // tile's from what it kept of the chunk's edge - then the columns opened out into the true step profile:
         // across a column its top runs level, at the column's far side it jumps straight to the next column's top. Joining the
@@ -729,11 +743,11 @@ final class BorderSeam implements AutoCloseable {
         for (int p = 0; p < m; p++) {
             float t = extended(this.vanT[p]);
             if (xEdge) {
-                this.vanWX[p] = planeX;
+                this.vanWX[p] = vanPlaneX;
                 this.vanWZ[p] = cz * 16.0F + t;
             } else {
                 this.vanWX[p] = cx * 16.0F + t;
-                this.vanWZ[p] = planeZ;
+                this.vanWZ[p] = vanPlaneZ;
             }
         }
         // Our profile: the tile's samples along the same side, at the heights they are drawn. A tile coarser than a chunk has no

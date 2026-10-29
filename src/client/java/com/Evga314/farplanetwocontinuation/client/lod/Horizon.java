@@ -38,16 +38,11 @@ final class Horizon {
      * Everything else it reads never changes.
      */
     static Job snapshot(LodView view, List<TileMesh> detail, List<TileMesh> rough, double ringRadius, double margin) {
-        float[] detailCuts = new float[detail.size() * 2];
-        for (int t = 0; t < detail.size(); t++) {
-            detailCuts[t * 2] = detail.get(t).keepRadius;
-            detailCuts[t * 2 + 1] = detail.get(t).fadeWidth;
-        }
         float[] roughCuts = new float[rough.size()];
         for (int t = 0; t < rough.size(); t++) {
             roughCuts[t] = rough.get(t).discardRadius;
         }
-        return new Job(view.camX, view.camY, view.camZ, ringRadius, margin, detail, detailCuts, rough, roughCuts);
+        return new Job(view.camX, view.camY, view.camZ, ringRadius, margin, detail, rough, roughCuts);
     }
 
     /**
@@ -98,16 +93,14 @@ final class Horizon {
         private final Map<TileMesh, boolean[]> hiddenChunks = new IdentityHashMap<>();
         private final Map<TileMesh, Boolean> occluded = new IdentityHashMap<>();
         private final List<TileMesh> detailTiles;
-        private final float[] detailCuts;
         private final List<TileMesh> roughTiles;
         private final float[] roughCuts;
 
         Job(
-            double camX, double camY, double camZ, double ringRadius, double margin, List<TileMesh> detailTiles, float[] detailCuts,
+            double camX, double camY, double camZ, double ringRadius, double margin, List<TileMesh> detailTiles,
             List<TileMesh> roughTiles, float[] roughCuts
         ) {
             this.detailTiles = detailTiles;
-            this.detailCuts = detailCuts;
             this.roughTiles = roughTiles;
             this.roughCuts = roughCuts;
             this.camX = camX;
@@ -119,14 +112,13 @@ final class Horizon {
             this.ringRadius = ringRadius;
         }
 
-        private void addDetail(TileMesh tile, float keep, float fadeWidth) {
+        private void addDetail(TileMesh tile) {
             int[] surfaces = tile.chunkSurfaces;
             int side = tile.chunksPerSide();
             if (surfaces == null || side == 0) {
                 return;
             }
             this.hiddenChunks.put(tile, new boolean[side * side]);
-            float solidEdge = keep - fadeWidth;
             for (int c = 0; c < side * side; c++) {
                 int low = surfaces[c * 2];
                 int high = surfaces[c * 2 + 1];
@@ -136,10 +128,8 @@ final class Horizon {
                 double x = tile.pos.minX() + (c % side) * 16.0;
                 double z = tile.pos.minZ() + (c / side) * 16.0;
                 int i = this.add(tile, c, x, z, 16.0, high + ABOVE_TOP);
-                // Only chunks that are drawn in full hide anything: not past the edge of the ring, not in its fading band.
-                if (keep <= 0.0F || this.far[i] + this.margin <= solidEdge) {
-                    this.bottom[i] = low;
-                }
+                // Every chunk the tile draws hides what is behind it, out to the tile's own edge.
+                this.bottom[i] = low;
             }
         }
 
@@ -236,7 +226,7 @@ final class Horizon {
 
         private Result cull(Workspace work, long start) {
             for (int t = 0; t < this.detailTiles.size(); t++) {
-                this.addDetail(this.detailTiles.get(t), this.detailCuts[t * 2], this.detailCuts[t * 2 + 1]);
+                this.addDetail(this.detailTiles.get(t));
             }
             for (int t = 0; t < this.roughTiles.size(); t++) {
                 this.addRough(this.roughTiles.get(t), this.roughCuts[t]);

@@ -84,10 +84,6 @@ final class TileMesh implements AutoCloseable {
     @Nullable TileMesh replacedBy;
     /** Fragments closer than this horizontal distance are dropped, because detailed tiles already cover them. Set every tick. */
     float discardRadius;
-    /** Fragments farther than this horizontal distance are dropped, so detailed tiles end exactly at the ring. 0 keeps everything. */
-    float keepRadius;
-    /** Over this width inside {@link #keepRadius} detailed tiles fade out block by block into the rough terrain. Set every tick. */
-    float fadeWidth;
     /** Distance to the camera in the current frame, used to draw near tiles first. */
     double sortDistance;
 

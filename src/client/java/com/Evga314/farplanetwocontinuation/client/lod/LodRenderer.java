@@ -394,37 +394,6 @@ public final class LodRenderer {
             .build()
     );
 
-    public static final RenderPipeline DETAIL_FADE_PIPELINE = RenderPipelines.registerOptional(
-        RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
-            .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_detail_fade"))
-            .withVertexShader(SHADER)
-            .withFragmentShader(SHADER)
-            .withShaderDefine("LIGHTMAP")
-            .withBindGroupLayout(BindGroupLayouts.SAMPLER2)
-            .withShaderDefine("FADE_PASS")
-            .withVertexBinding(0, DefaultVertexFormat.POSITION_COLOR)
-            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
-            .withColorTargetState(new ColorTargetState(BlendFunction.TRANSLUCENT))
-            .withDepthStencilState(DepthStencilState.DEFAULT)
-            .withCull(true)
-            .build()
-    );
-
-    public static final RenderPipeline DEPTH_DETAIL_TEXTURED_PIPELINE = RenderPipelines.registerOptional(
-        RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
-            .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_detail_textured_depth"))
-            .withVertexShader(SHADER)
-            .withFragmentShader(SHADER)
-            .withShaderDefine("DEPTH_ONLY")
-            .withShaderDefine("TEXTURED")
-            .withVertexBinding(0, TEXTURED_FORMAT)
-            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
-            .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, 0))
-            .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true))
-            .withCull(true)
-            .build()
-    );
-
     public static final RenderPipeline DEPTH_DETAIL_PIPELINE = RenderPipelines.registerOptional(
         RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
             .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_detail_depth"))
@@ -441,8 +410,7 @@ public final class LodRenderer {
 
     static {
         java.util.Collections.addAll(LIT_PIPELINES, PIPELINE, SOLID_PIPELINE, FLOATING_PIPELINE, UNDER_DETAIL_PIPELINE, DETAIL_PIPELINE,
-            DETAIL_TEXTURED_PIPELINE, DETAIL_SOLID_PIPELINE, DETAIL_TEXTURED_SOLID_PIPELINE, DETAIL_WATER_PIPELINE, DETAIL_TEXTURED_FADE_PIPELINE,
-            DETAIL_FADE_PIPELINE);
+            DETAIL_TEXTURED_PIPELINE, DETAIL_SOLID_PIPELINE, DETAIL_TEXTURED_SOLID_PIPELINE, DETAIL_WATER_PIPELINE, DETAIL_TEXTURED_FADE_PIPELINE);
     }
 
     private final LodManager manager;
@@ -810,19 +778,14 @@ public final class LodRenderer {
         // The wall darkens as the camera goes deeper, like vanilla's view under water.
         float cameraShade = Mth.lerp((float) Math.exp(-Math.max(0.0, waterTop - camY) / WALL_CAMERA_DEPTH), WALL_CAMERA_DEEPEST, 1.0F);
         frame.begin(vanillaWallIndex + (vanillaWall ? 1 : 0));
-        boolean anyFade = false;
         boolean anyWater = false;
         for (int i = 0; i < this.visible.size(); i++) {
             TileMesh mesh = this.visible.get(i);
-            anyFade |= mesh.fadeWidth > 0.0F;
             anyWater |= mesh.hasWater;
             // TextureMat is unused by this shader, so it carries per-tile parameters: [0][0] inner cut, [1][1] outer cut, [2][2] depth
             // priority, [3][3] overworld sky. Rough tiles give way to detailed ones wherever both are drawn.
             Matrix4f cut = frame.matrix().zero();
             cut.m00(mesh.discardRadius);
-            cut.m11(mesh.keepRadius);
-            // [1][3]: the width of the band inside the outer cut where detailed tiles fade into the rough terrain.
-            cut.m13(mesh.fadeWidth);
             // [2][3]: rough tiles lay their tree tops flat closer than this, where detailed tiles or vanilla's chunks are drawn.
             cut.m23(mesh.detail ? 0.0F : canopyStart);
             if (!mesh.detail) {
@@ -917,7 +880,6 @@ public final class LodRenderer {
         this.frameChunkMask = this.uploadChunkMask(camX, camY, camZ);
         CompiledRenderPipeline roughPipeline = pipeline;
         boolean waterTiles = anyWater;
-        boolean fadeTiles = anyFade;
         CompiledRenderPipeline floorPipeline = floor && quadIndices != null ? this.compiledPipeline(FLOOR_PIPELINE) : null;
         GpuBuffer floorVertices = floorPipeline != null ? this.worldFloor(minecraft, camX, camY, camZ) : null;
         java.util.function.Consumer<RenderPass> drawFloor = pass -> {
@@ -944,7 +906,7 @@ public final class LodRenderer {
                 pass.setPipeline(roughPipeline);
                 // The rough terrain, then its water under the detailed tiles (see UNDER_DETAIL_PIPELINE), then the detailed tiles.
                 Pipelines rough = new Pipelines(
-                    roughPipeline, null, null, true, false, false, new CompiledRenderPipeline[] {this.compiledPipeline(SOLID_PIPELINE), null, null}
+                    roughPipeline, null, null, true, false, new CompiledRenderPipeline[] {this.compiledPipeline(SOLID_PIPELINE), null, null}
                 );
                 PerfLog.pass(0);
                 this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, rough);
@@ -979,12 +941,6 @@ public final class LodRenderer {
                 );
                 PerfLog.pass(2);
                 this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, detail);
-                if (fadeTiles) {
-                    // The fading edge of the detailed tiles, blended over the rough terrain drawn under it.
-                    Pipelines fade = new Pipelines(null, this.compiledPipeline(DETAIL_FADE_PIPELINE), this.compiledPipeline(DETAIL_TEXTURED_FADE_PIPELINE), true, false, true);
-                    PerfLog.pass(3);
-                    this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, fade);
-                }
                 if (wallPipeline != null && wallVertices != null) {
                     pass.setPipeline(wallPipeline);
                     pass.setIndexBuffer(quadIndices, IndexType.INT);
@@ -1079,9 +1035,9 @@ public final class LodRenderer {
             // everywhere. Rough terrain writes none where vanilla or the detailed tiles draw (the chunk mask, see the shader), but
             // within vanilla's render distance it does where vanilla has nothing yet: clouds behind it are hidden there too.
             float pushInside = 0.0F;
-            // Rough tiles never have an outer cut; a negative w there is where their tree tops start to rise instead.
+            // Tiles never have an outer cut; a negative w there is where their tree tops start to rise instead.
             Vector4f parameters = frame.vector().set(
-                pushInside, zeroToOne ? 1.0F : 0.0F, mesh.discardRadius, mesh.detail ? mesh.keepRadius : -(float) this.manager.canopyStart()
+                pushInside, zeroToOne ? 1.0F : 0.0F, mesh.discardRadius,  mesh.detail ? 0.0F : -(float) this.manager.canopyStart()
             );
             Vector3f offset = frame.offset(mesh, camX, camY, camZ);
             frame.set(i, new DynamicGpuData.Transform(camera.viewRotationMatrix, parameters, offset, vanillaProjection));
@@ -1114,40 +1070,6 @@ public final class LodRenderer {
         }
     }
 
-    /**
-     * The pipelines of one pass: rough tiles, detailed tiles in flat colors and detailed tiles with block textures. A water pass only
-     * draws the tiles with translucent water.
-     */
-    private record Pipelines(
-        @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
-        boolean waterOnly, boolean fadeOnly, @Nullable CompiledRenderPipeline @Nullable [] solid, boolean skipSolid
-    ) {
-        Pipelines(
-            @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
-            boolean waterOnly, boolean fadeOnly
-        ) {
-            this(rough, detail, textured, bindAtlas, waterOnly, fadeOnly, null, false);
-        }
-
-        Pipelines(
-            @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
-            boolean waterOnly, boolean fadeOnly, @Nullable CompiledRenderPipeline @Nullable [] solid
-        ) {
-            this(rough, detail, textured, bindAtlas, waterOnly, fadeOnly, solid, false);
-        }
-
-        /** The pipeline of a {@link #drawKind}: the one that never drops fragments for solid tiles, where this pass has one. */
-        @Nullable CompiledRenderPipeline of(int drawKind) {
-            int kind = drawKind / 2;
-            if (drawKind % 2 == 0 && this.skipSolid) {
-                return null;
-            }
-            if (drawKind % 2 == 0 && this.solid != null && this.solid[kind] != null) {
-                return this.solid[kind];
-            }
-            return kind == KIND_ROUGH ? this.rough : kind == KIND_DETAIL ? this.detail : this.textured;
-        }
-    }
 
     /** How wide a border is drawn at a step of blur, in units of its value, as the shader does for the steps kept with samples. */
     private static float blurWidth(int step) {
@@ -1167,7 +1089,7 @@ public final class LodRenderer {
     }
 
     /**
-     * Whether nothing of a tile is cut away this frame: no part closer than its inner cut or past its outer cut, no sections vanilla
+     * Whether nothing of a tile is cut away this frame: no part closer than its inner cut,., no sections vanilla
      * draws, no translucent water or textures with gaps, no void between islands (the End).
      */
     private static boolean isSolid(TileMesh mesh, double camX, double camZ, boolean end, double maskRadius) {
@@ -1181,7 +1103,7 @@ public final class LodRenderer {
         if (mesh.discardRadius > 0.0F && mesh.pos.distanceTo(camX, camZ) < mesh.discardRadius) {
             return false;
         }
-        return mesh.keepRadius <= 0.0F || mesh.pos.farthestDistanceTo(camX, camZ) <= mesh.keepRadius - mesh.fadeWidth;
+        return true;
     }
 
     /**

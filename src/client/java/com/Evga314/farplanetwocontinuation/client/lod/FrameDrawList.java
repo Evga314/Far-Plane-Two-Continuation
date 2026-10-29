@@ -20,7 +20,6 @@ import java.util.List;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.DynamicGpuDataStorage;
 import net.minecraft.client.renderer.DynamicGpuDataStorageMapped;
-import net.minecraft.client.renderer.MappableRingBuffer;
 import net.minecraft.util.Util;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
@@ -33,7 +32,7 @@ import org.slf4j.Logger;
 /**
  * What the new renderer's rough terrain draws in a frame, worked out once and drawn by whichever output the device takes
  * ({@link OwnPassOutput}, {@link VanillaPassOutput}, or with a shader pack IrisOutput): the tiles in view, nearest first, and of each its chunk columns by the owners of
- * this frame ({@link OwnershipMap}): its own, a background under vanilla, or nothing. Also what the shaders need: the frame's block,
+ * this frame ({@link OwnershipMap}):its own or nothing. Also what the shaders need: the frame's block and each tile's block.
  * each tile's block, and what the ring under vanilla's edge needs to know of its neighbours (see {@link #ringInfo}).
  * <p>
  * Everything is written before a pass opens, as nothing may be written to buffers while one is. Each tile is then one draw call per
@@ -50,8 +49,6 @@ final class FrameDrawList implements AutoCloseable {
      */
     private static final float DEPTH_PUSH = 1.01F;
     private static final float DEPTH_PUSH_PER_LEVEL = 0.002F;
-    /** Values before the columns in the ring's buffer, see {@link #ringInfo}. */
-    private static final int RING_HEADER = 4;
 
     /** What the frame block holds, see surface.glsl. */
     private static final class FrameData implements DynamicGpuDataStorage.DynamicGpuData {
@@ -116,12 +113,6 @@ final class FrameDrawList implements AutoCloseable {
     private final List<TileMesh> seamDetailTiles = new ArrayList<>();
     private boolean[] vanillaColumns = new boolean[0];
     private boolean[] detailedColumns = new boolean[0];
-    /** The ring's buffer, see {@link #ringInfo}, and the version of the map each of its three buffers holds. */
-    private @Nullable MappableRingBuffer ringBuffer;
-    private final int[] ringVersions = {-1, -1, -1};
-    private int ringSlot;
-    private @Nullable GpuBuffer ringInfo;
-    private int[] ringValues = new int[0];
     /** What one draw call of a tile's ranges takes, kept. */
     private PointerBuffer offsets = MemoryUtil.memAllocPointer(256);
     private IntBuffer counts = MemoryUtil.memAllocInt(256);
@@ -180,11 +171,10 @@ final class FrameDrawList implements AutoCloseable {
 
         LodManager.ChunkMask mask = this.manager.chunkMask();
         this.updateOwnership(mask);
-        this.ringInfo = this.writeRingInfo(mask, camX, camY, camZ);
 
         int count = this.tiles.size();
-        if (this.tileData.length < 2 * count) {
-            TileData[] grown = Arrays.copyOf(this.tileData, Math.max(2 * count, this.tileData.length * 2));
+        if (this.tileData.length < count) {
+            TileData[] grown = Arrays.copyOf(this.tileData, Math.max(count, this.tileData.length * 2));
             for (int i = this.tileData.length; i < grown.length; i++) {
                 grown[i] = new TileData();
             }
@@ -194,24 +184,21 @@ final class FrameDrawList implements AutoCloseable {
             this.parts = Arrays.copyOf(this.parts, Math.max(count, this.parts.length * 2));
         }
         // The storage writes an array as long as it is: one of that length, kept while the count stays.
-        if (this.written.length != 2 * count) {
-            this.written = new TileData[2 * count];
+        if (this.written.length != count) {
+            this.written = new TileData[count];
         }
         TileData[] written = this.written;
-        float tint = DebugToggles.markRing ? 1.0F : 0.0F;
         for (int i = 0; i < count; i++) {
             TileMesh mesh = this.tiles.get(i);
             SurfaceTile surface = mesh.surface;
-            for (int k = 0; k < 2; k++) {
-                TileData data = this.tileData[2 * i + k];
-                data.x = (float) (mesh.pos.minX() - camX);
-                data.y = (float) (surface.baseY() - camY);
-                data.z = (float) (mesh.pos.minZ() - camZ);
-                data.scale = (1 << mesh.pos.level()) / LodVertex.XZ_UNITS;
-                data.tint = k == 0 ? 0.0F : tint;
-                data.push = DEPTH_PUSH + DEPTH_PUSH_PER_LEVEL * mesh.pos.level();
-                written[2 * i + k] = data;
-            }
+            TileData data = this.tileData[i];
+            data.x = (float) (mesh.pos.minX() - camX);
+            data.y = (float) (surface.baseY() - camY);
+            data.z = (float) (mesh.pos.minZ() - camZ);
+            data.scale = (1 << mesh.pos.level()) / LodVertex.XZ_UNITS;
+            data.tint = 0.0F;
+            data.push = DEPTH_PUSH + DEPTH_PUSH_PER_LEVEL * mesh.pos.level();
+            written[i] = data;
             int groups = surface.groups() * surface.groups();
             if (this.parts[i] == null || this.parts[i].length < groups) {
                 this.parts[i] = new byte[Math.max(groups, 16)];
@@ -274,8 +261,7 @@ final class FrameDrawList implements AutoCloseable {
         for (int i = 0; i < values.length; i++) {
             int value = values[i];
             this.vanillaColumns[i] = (value & (LodManager.ChunkMask.VANILLA | LodManager.ChunkMask.VANILLA_EDGE)) != 0;
-            // Along the edge of the detailed tiles they fade out over the rough terrain, which draws under them there.
-            this.detailedColumns[i] = (value & LodManager.ChunkMask.DETAILED) != 0 && (value & LodManager.ChunkMask.DETAILED_EDGE) == 0;
+            this.detailedColumns[i] = (value & LodManager.ChunkMask.DETAILED) != 0;
         }
         this.ownership.update(half, mask.originX(), mask.originZ(), this.vanillaColumns, this.detailedColumns, Util.getMillis());
     }
@@ -301,71 +287,10 @@ final class FrameDrawList implements AutoCloseable {
         }
     }
 
-    /**
-     * What the vertex shader needs to lower the ring towards vanilla's floor (see surface.vsh), as a buffer of ints: the camera's place
-     * from the corner of the map's middle chunk (x and z, float bits), how many chunks the map reaches from the middle (below 0 none),
-     * the height of the camera over the bottom of the world plus 1 (float bits), then per column the sides the rough terrain owns
-     * (OwnershipMap.WEST and on) and from bit 16 the floor under vanilla's blocks there, counted from the bottom of the world up from 1
-     * (0 none). The columns are written only when the map has changed.
-     */
-    private @Nullable GpuBuffer writeRingInfo(LodManager.ChunkMask mask, double camX, double camY, double camZ) {
-        OwnershipMap map = this.ownership;
-        int half = map.half();
-        int side = 2 * half + 1;
-        int columns = half < 0 ? 0 : side * side;
-        int size = (RING_HEADER + Math.max(columns, 1)) * 4;
-        try {
-            if (this.ringBuffer == null || this.ringBuffer.size() < size) {
-                if (this.ringBuffer != null) {
-                    this.ringBuffer.close();
-                }
-                // Room for render distances up to 64 at once, so it is made only once.
-                int capacity = Math.max(size, (RING_HEADER + 131 * 131) * 4);
-                this.ringBuffer = new MappableRingBuffer(() -> "FarPlane ring", GpuBuffer.USAGE_UNIFORM_TEXEL_BUFFER | GpuBuffer.USAGE_MAP_WRITE, capacity);
-                Arrays.fill(this.ringVersions, -1);
-                this.ringSlot = 0;
-            }
-            this.ringBuffer.rotate();
-            this.ringSlot = (this.ringSlot + 1) % 3;
-            GpuBuffer buffer = this.ringBuffer.currentBuffer();
-            boolean values = this.ringVersions[this.ringSlot] != map.version();
-            if (values && columns > 0) {
-                if (this.ringValues.length != columns) {
-                    this.ringValues = new int[columns];
-                }
-                int[] maskValues = mask.values();
-                boolean sameGrid = mask.half() == half && mask.originX() == map.originX() && mask.originZ() == map.originZ()
-                    && maskValues.length == columns;
-                for (int z = 0; z < side; z++) {
-                    for (int x = 0; x < side; x++) {
-                        int i = x + z * side;
-                        int floor = sameGrid ? maskValues[i] & 0xFFFF0000 : 0;
-                        this.ringValues[i] = map.roughNeighbours(map.originX() + x - half, map.originZ() + z - half) | floor;
-                    }
-                }
-            }
-            try (GpuBufferSlice.MappedView view = buffer.slice(0, values ? size : RING_HEADER * 4).map(false, true)) {
-                ByteBuffer data = view.data().order(ByteOrder.nativeOrder());
-                data.putInt(Float.floatToIntBits((float) (camX - map.originX() * 16.0)));
-                data.putInt(Float.floatToIntBits((float) (camZ - map.originZ() * 16.0)));
-                data.putInt(columns == 0 ? -1 : half);
-                data.putInt(Float.floatToIntBits((float) (camY - mask.minY() + 1)));
-                if (values && columns > 0) {
-                    data.asIntBuffer().put(this.ringValues, 0, columns);
-                }
-            }
-            this.ringVersions[this.ringSlot] = map.version();
-            return buffer;
-        } catch (RuntimeException e) {
-            LOGGER.error("FarPlane could not write the ring's buffer", e);
-            Arrays.fill(this.ringVersions, -1);
-            return null;
-        }
-    }
 
     /**
      * Draws a layer of every tile: the ground ({@code water} false) nearest first, or the water farthest first, so it blends over what
-     * lies behind it; of each tile the columns of kind {@code part} (OwnershipMap.OWN or BACKGROUND), only those within {@code distance}
+     * lies behind it; of each tile the columns of kind {@code part} (OwnershipMap.OWN), only those within {@code distance}
      * of the camera. The pipeline is set here; what else the pass needs (the projection, the fog) the output binds.
      */
     void draw(RenderPass pass, @Nullable CompiledRenderPipeline pipeline, boolean water, byte part, double distance) {
@@ -373,16 +298,9 @@ final class FrameDrawList implements AutoCloseable {
         if (pipeline == null || slices == null || this.frameSlice == null) {
             return;
         }
-        boolean background = part == OwnershipMap.BACKGROUND;
-        if (background && this.ringInfo == null) {
-            return;
-        }
         pass.setPipeline(pipeline);
         pass.setUniform("SurfaceFrame", this.frameSlice);
         pass.setUniform("Sampler2", Minecraft.getInstance().gameRenderer.levelLightmap(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
-        if (background) {
-            pass.setUniform("RingInfo", this.ringInfo);
-        }
         GpuBuffer bound = null;
         int count = this.tiles.size();
         for (int n = 0; n < count; n++) {
@@ -413,7 +331,7 @@ final class FrameDrawList implements AutoCloseable {
                 pass.setIndexBuffer(indices, IndexType.SHORT);
                 bound = indices;
             }
-            pass.setUniform("SurfaceTile", slices[2 * i + (background ? 1 : 0)]);
+            pass.setUniform("SurfaceTile", slices[i]);
             pass.setVertexBuffer(0, mesh.vertexSlice());
             if (this.separateMultiDraw()) {
                 pass.multiDrawIndexed(this.offsets, this.counts, this.baseVertices, draws);
@@ -520,10 +438,6 @@ final class FrameDrawList implements AutoCloseable {
             this.tileStorage.close();
             this.frames = null;
             this.tileStorage = null;
-        }
-        if (this.ringBuffer != null) {
-            this.ringBuffer.close();
-            this.ringBuffer = null;
         }
         for (int i = 0; i < this.groundIndices.length; i++) {
             if (this.groundIndices[i] != null) {

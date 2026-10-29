@@ -182,7 +182,7 @@ public final class LodManager {
 
     /**
      * Puts the chunks vanilla draws and those the detailed tiles draw together, see {@link ChunkMask}. A chunk is marked detailed while
-     * a tile drawing it has all its blocks there, never in the band where the ring fades out. Tiles hidden behind terrain count as
+     * a tile drawing it has all its blocks there. Tiles hidden behind terrain count as
      * drawn: the rough terrain there is behind the same terrain, and a mark that came and went with culling would make the rough
      * terrain flicker in and out. The mask is made into a second array and only becomes the new one, with a new version the renderer
      * sends to the GPU, when something in it changed.
@@ -223,8 +223,6 @@ public final class LodManager {
                 values[x + z * side] = edge ? ChunkMask.VANILLA_EDGE : ChunkMask.VANILLA;
             }
         }
-        double camX = this.view.camX;
-        double camZ = this.view.camZ;
         for (TileMesh mesh : this.detail.drawList()) {
             if (mesh.vertices.isClosed()) {
                 continue;
@@ -243,13 +241,6 @@ public final class LodManager {
                     int z = (int) Math.floorDiv(chunkMinZ, 16L) - this.drawnZ + half;
                     if (x < 0 || z < 0 || x >= side || z >= side) {
                         continue;
-                    }
-                    if (mesh.keepRadius > 0.0F) {
-                        double fx = Math.max(Math.abs(chunkMinX - camX), Math.abs(chunkMinX + 16.0 - camX));
-                        double fz = Math.max(Math.abs(chunkMinZ - camZ), Math.abs(chunkMinZ + 16.0 - camZ));
-                        if (Math.sqrt(fx * fx + fz * fz) > mesh.keepRadius - mesh.fadeWidth) {
-                            continue;
-                        }
                     }
                     values[x + z * side] |= ChunkMask.DETAILED;
                     int[] surfaces = mesh.chunkSurfaces;
@@ -601,24 +592,19 @@ public final class LodManager {
 
         DetailCoverage coverage = null;
         double ringRadius = this.detail.configure(this.hello, this.view);
+        DetailCoverage coverage = null;
+        double ringRadius = this.detail.configure(this.hello, this.view);
         this.detailRingRadius = ringRadius;
-        // A wider ring fades out over a wider band, so the band never takes much of a small ring.
-        double fade = Mth.clamp(ringRadius / 8.0, 16.0, 256.0);
         if (ringRadius > 0.0) {
             this.detail.select(this.view, this.tick, now);
-            coverage = new DetailCoverage(this.view, ringRadius, fade, this.detail.drawList());
-            for (TileMesh mesh : this.detail.drawList()) {
-                boolean edge = mesh.pos.farthestDistanceTo(this.view.camX, this.view.camZ) > ringRadius - fade;
-                mesh.keepRadius = edge ? (float) ringRadius : 0.0F;
-                mesh.fadeWidth = edge ? (float) fade : 0.0F;
-            }
+            coverage = new DetailCoverage(this.view, ringRadius, this.detail.drawList());
         } else if (this.detail.hasWork()) {
             this.detail.reset();
         }
         phaseStart = this.tickPhase(1, phaseStart);
 
         this.rough.configure(this.hello, this.view, coverage, ringRadius > 0.0 ? ringRadius : this.view.vanillaRadius);
-        this.canopyStart = ringRadius > 0.0 ? ringRadius - fade : this.view.vanillaRadius;
+        this.canopyStart = ringRadius > 0.0 ? ringRadius : this.view.vanillaRadius;
         // Rough tiles drop out where detailed tiles cover the ground: when those change, the rough tree is walked again.
         if (this.detail.drawListVersion() != this.seenDetailVersion) {
             this.seenDetailVersion = this.detail.drawListVersion();

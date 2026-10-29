@@ -78,7 +78,6 @@ final class DebugToggles {
         // These two need no tiles built again.
         boolean frameMask = noFrameMask != (noFrameMask = check(config, "farplane-debug-no-frame-mask"));
         boolean mainPass = noMainPass != (noMainPass = check(config, "farplane-debug-no-main-pass"));
-        markRing = check(config, "farplane-debug-mark-ring");
         if (frameMask || mainPass) {
             LOGGER.info("[FarPlane debug] chunks along vanilla's edge asked every frame {}, LOD terrain in vanilla's main pass {}", !noFrameMask, !noMainPass);
         }

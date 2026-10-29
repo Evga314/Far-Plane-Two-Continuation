@@ -509,8 +509,6 @@ abstract class LodLayer {
         for (TileMesh mesh : this.drawList) {
             mesh.lastUsedTick = this.tick;
             mesh.discardRadius = 0.0F;
-            mesh.keepRadius = 0.0F;
-            mesh.fadeWidth = 0.0F;
         }
         for (TileMesh mesh : this.keptParents) {
             mesh.lastUsedTick = Math.max(mesh.lastUsedTick, this.tick - 1);

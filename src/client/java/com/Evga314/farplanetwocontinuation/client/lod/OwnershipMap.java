@@ -4,20 +4,15 @@ package com.Evga314.farplanetwocontinuation.client.lod;
  * Who draws every chunk column around the camera this frame (stages 4 and 5 of the rewrite): vanilla, the detailed tiles or the
  * rough terrain. One decision per column, made once a frame, which every output follows; see {@link #part}.
  * <p>
- * The rough terrain draws a column in one of two ways. Its own columns, which nobody else draws, it draws as they are, with their
- * depth. Under vanilla it draws only a background, which shows where vanilla leaves something open and nowhere else (see the outputs):
- * <ul>
- * <li>a ring of one chunk under the edge of vanilla's columns: the gap along that edge, the seabed under vanilla's water there
- * (Sodium leaves out the deep sections along the edge of its render distance, which it measures as a sphere);</li>
- * <li>a column vanilla started drawing: in the very frame it does (what Sodium draws in a frame is read before the LOD terrain is
- * drawn, see LodManager.frameCheck), so the column turns from the rough terrain's into vanilla's without both being seen at once.</li>
- * </ul>
- * A column vanilla has drawn for {@link #HANDOVER_MS} without a break, away from the edge, is not drawn at all: the background there
- * would show nothing, only cost. The delay only goes that way: a column vanilla stops drawing is the rough terrain's again at once.
- * It is in time, not frames, so a phone at 30 frames a second waits as long as a computer at 144.
+ * The rough terrain draws only its own columns, as they are, with their depth; of every other column it draws nothing. Where its
+ * columns end against vanilla's or a detailed tile's, the border seam closes the wedge between the two surfaces (see BorderSeam).
+ * A column vanilla has just started drawing counts as vanilla's from that very frame (what Sodium draws in a frame is read before
+ * the LOD terrain is drawn, see LodManager.frameCheck), so the column turns from the rough terrain's into vanilla's in one frame;
+ * one it has drawn for {@link #HANDOVER_MS} without a break is settled. The delay only goes that way: a column vanilla stops
+ * drawing is the rough terrain's again at once. It is in time, not frames, so a phone at 30 frames a second waits as long as a
+ * computer at 144.
  * <p>
- * Against the detailed tiles there is no ring: they fade out over the rough terrain anyway, and both are drawn in the same pass,
- * where they would fight over the same depth. Plain values only, so it can be tested without the game. Render thread only.
+ * Plain values only, so it can be tested without the game. Render thread only.
  */
 final class OwnershipMap {
     /** How long vanilla has to draw a column without a break before the rough terrain stops drawing even its background. */
@@ -32,17 +27,6 @@ final class OwnershipMap {
     /** What the rough terrain draws of a column. */
     static final byte NONE = 0;
     static final byte OWN = 1;
-    static final byte BACKGROUND = 2;
-
-    /** The neighbours of a column the rough terrain owns, one bit each, see {@link #roughNeighbours}. */
-    static final int WEST = 1;
-    static final int EAST = 2;
-    static final int NORTH = 4;
-    static final int SOUTH = 8;
-    static final int NORTH_WEST = 16;
-    static final int NORTH_EAST = 32;
-    static final int SOUTH_WEST = 64;
-    static final int SOUTH_EAST = 128;
 
     /** Chunks from the middle of the map to its edge, and the chunk in its middle. */
     private int half = -1;
@@ -159,32 +143,10 @@ final class OwnershipMap {
         return this.owners[(int) x + (int) z * side];
     }
 
-    /** What the rough terrain draws of a column: its own, a background (the ring, a column being handed over), or nothing. */
+    /** What the rough terrain draws of a column: its own columns as they are, nothing of the others. */
     byte part(long chunkX, long chunkZ) {
-        byte owner = this.owner(chunkX, chunkZ);
-        if (owner == ROUGH) {
-            return OWN;
-        }
-        if (owner == HANDOVER) {
-            return BACKGROUND;
-        }
-        if (owner == DETAILED) {
-            return NONE;
-        }
-        return this.roughNeighbours(chunkX, chunkZ) != 0 ? BACKGROUND : NONE;
+        return this.owner(chunkX, chunkZ) == ROUGH ? OWN : NONE;
     }
 
-    /** The neighbours of a column the rough terrain owns, as the bits {@link #WEST} to {@link #SOUTH_EAST}. */
-    int roughNeighbours(long chunkX, long chunkZ) {
-        int bits = 0;
-        bits |= this.owner(chunkX - 1, chunkZ) == ROUGH ? WEST : 0;
-        bits |= this.owner(chunkX + 1, chunkZ) == ROUGH ? EAST : 0;
-        bits |= this.owner(chunkX, chunkZ - 1) == ROUGH ? NORTH : 0;
-        bits |= this.owner(chunkX, chunkZ + 1) == ROUGH ? SOUTH : 0;
-        bits |= this.owner(chunkX - 1, chunkZ - 1) == ROUGH ? NORTH_WEST : 0;
-        bits |= this.owner(chunkX + 1, chunkZ - 1) == ROUGH ? NORTH_EAST : 0;
-        bits |= this.owner(chunkX - 1, chunkZ + 1) == ROUGH ? SOUTH_WEST : 0;
-        bits |= this.owner(chunkX + 1, chunkZ + 1) == ROUGH ? SOUTH_EAST : 0;
-        return bits;
-    }
+
 }

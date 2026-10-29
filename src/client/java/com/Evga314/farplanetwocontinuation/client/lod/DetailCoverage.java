@@ -12,8 +12,6 @@ final class DetailCoverage {
     private static final int CELL = FarPlaneConstants.tileSize(FarPlaneConstants.DETAIL_MIN_LEVEL);
 
     private final double radius;
-    /** Width of the band at the edge of the ring where detailed tiles fade into the rough terrain under them. */
-    private final double fade;
     private final double camX;
     private final double camZ;
     private final long originX;
@@ -24,7 +22,6 @@ final class DetailCoverage {
 
     DetailCoverage(LodView view, double radius, double fade, List<TileMesh> detailTiles) {
         this.radius = radius;
-        this.fade = fade;
         this.camX = view.camX;
         this.camZ = view.camZ;
         this.originX = Math.floorDiv((long) Math.floor(view.camX - radius), CELL);
@@ -87,7 +84,7 @@ final class DetailCoverage {
             - this.missing[(int) (z1 * stride + x0)] + this.missing[(int) (z0 * stride + x0)];
     }
 
-    /** A rough tile completely inside the ring and its fading edge, whose whole area is already shown, does not need to be drawn. */
+    /** A rough tile completely inside the ring, whose whole area is already shown, does not need to be drawn. */
     boolean coversTile(TilePos pos) {
         return pos.farthestDistanceTo(this.camX, this.camZ) <= this.radius - this.fade && this.missingIn(pos) == 0;
     }

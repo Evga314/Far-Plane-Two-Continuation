@@ -11,10 +11,9 @@ import org.jspecify.annotations.Nullable;
  * plane at infinity (see CameraMixin): the fastest way, for devices with depth from 0 to 1 (computers, Vulkan). Whatever vanilla drew
  * in front is rejected before it is shaded, and no depth has to be written for vanilla.
  * <p>
- * The ground goes right after vanilla's opaque chunks: the rough terrain's own columns with their depth, then the background under
- * vanilla's at the far plane, which passes the depth test only where vanilla drew nothing (the gap along its edge, the seabed it left
- * out, a column it has just started drawing) and writes no depth. The water of the own columns goes after vanilla's solid entities,
- * before its translucent things, which blend over it.
+ * The ground goes right after vanilla's opaque chunks: the rough terrain's own columns with their depth, and the border seam with
+ * them (see {@link BorderSeam}), closing the wedge along the edge of vanilla's columns and of the detailed tiles. The water of the
+ * own columns goes after vanilla's solid entities, before its translucent things, which blend over it.
  */
 final class VanillaPassOutput {
     private final FrameDrawList drawList;
@@ -28,8 +27,8 @@ final class VanillaPassOutput {
     void drawGround(RenderPass pass) {
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.GROUND), false, OwnershipMap.OWN, Double.MAX_VALUE);
         this.drawList.drawSeam(pass, this.compile.apply(SurfacePipelines.GROUND));
-        this.drawList.draw(pass, this.compile.apply(SurfacePipelines.BACKGROUND), false, OwnershipMap.BACKGROUND, Double.MAX_VALUE);
     }
+
     void drawWater(RenderPass pass) {
         this.drawList.draw(pass, this.compile.apply(SurfacePipelines.WATER), true, OwnershipMap.OWN, Double.MAX_VALUE);
     }

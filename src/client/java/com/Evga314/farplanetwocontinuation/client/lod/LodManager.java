@@ -592,8 +592,6 @@ public final class LodManager {
 
         DetailCoverage coverage = null;
         double ringRadius = this.detail.configure(this.hello, this.view);
-        DetailCoverage coverage = null;
-        double ringRadius = this.detail.configure(this.hello, this.view);
         this.detailRingRadius = ringRadius;
         if (ringRadius > 0.0) {
             this.detail.select(this.view, this.tick, now);

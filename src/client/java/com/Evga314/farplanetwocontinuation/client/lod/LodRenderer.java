@@ -922,12 +922,12 @@ public final class LodRenderer {
                 CompiledRenderPipeline under = end || DebugToggles.noPatch || DebugToggles.surface ? null : this.compiledPipeline(UNDER_DETAIL_PIPELINE);
                 if (under != null) {
                     // Solid rough tiles lie beyond the detailed tiles and vanilla's chunks: only the others have water there.
-                    Pipelines underDetail = new Pipelines(under, null, null, true, false, false, new CompiledRenderPipeline[] {null, null, null}, true);
+                    Pipelines underDetail = new Pipelines(under, null, null, true, false, new CompiledRenderPipeline[] {null, null, null}, true);
                     PerfLog.pass(1);
                     this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, underDetail);
                 }
                 Pipelines detail = new Pipelines(
-                    null, this.compiledPipeline(DETAIL_PIPELINE), this.compiledPipeline(DETAIL_TEXTURED_PIPELINE), true, false, false,
+                    null, this.compiledPipeline(DETAIL_PIPELINE), this.compiledPipeline(DETAIL_TEXTURED_PIPELINE), true, false,
                     new CompiledRenderPipeline[] {null, this.compiledPipeline(DETAIL_SOLID_PIPELINE), this.compiledPipeline(DETAIL_TEXTURED_SOLID_PIPELINE)}
                 );
                 PerfLog.pass(2);
@@ -959,7 +959,7 @@ public final class LodRenderer {
                 long waterStart = PerfLog.ON ? System.nanoTime() : 0L;
                 pass.setUniform("Fog", fogSlice);
                 PerfLog.pass(4);
-                this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, new Pipelines(null, null, waterPipeline, true, true, false));
+                this.drawAll(pass, this.visible, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, new Pipelines(null, null, waterPipeline, true, true));
                 if (PerfLog.ON) {
                     PerfLog.renderPhase(6, waterStart);
                 }
@@ -1053,8 +1053,7 @@ public final class LodRenderer {
             pass.setUniform("Projection", projection);
             pass.setUniform("Fog", fog);
             Pipelines pipelines = new Pipelines(
-                depthPipeline, this.compiledPipeline(DEPTH_DETAIL_PIPELINE), this.compiledPipeline(DEPTH_DETAIL_TEXTURED_PIPELINE), false, false, false
-            );
+                depthPipeline, this.compiledPipeline(DEPTH_DETAIL_PIPELINE), this.compiledPipeline(DEPTH_DETAIL_TEXTURED_PIPELINE), false, false);
             PerfLog.pass(5);
             this.drawAll(pass, this.depthTiles, transformSlices, frame.clippedFirst, frame.clippedCount, roughIndices, quadIndices, pipelines);
             this.ownOutput.drawDepth(pass, camera.depthFar);
@@ -1251,8 +1250,7 @@ public final class LodRenderer {
             }
             int kind = drawKind(mesh);
             CompiledRenderPipeline pipeline = pipelines.of(kind);
-            if (pipeline == null || mesh.detail && quadIndices == null || pipelines.waterOnly() && !mesh.hasWater
-                || pipelines.fadeOnly() && mesh.fadeWidth <= 0.0F) {
+            if (pipeline == null || mesh.detail && quadIndices == null || pipelines.waterOnly() && !mesh.hasWater) {
                 continue;
             }
             if (bound != kind) {

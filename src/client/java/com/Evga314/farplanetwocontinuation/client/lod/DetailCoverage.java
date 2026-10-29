@@ -20,7 +20,7 @@ final class DetailCoverage {
     /** {@code missing[(z + 1) * (size + 1) + x + 1]} = missing cells in the rectangle from the origin to (x, z) inclusive. */
     private final int[] missing;
 
-    DetailCoverage(LodView view, double radius, double fade, List<TileMesh> detailTiles) {
+    DetailCoverage(LodView view, double radius, List<TileMesh> detailTiles) {
         this.radius = radius;
         this.camX = view.camX;
         this.camZ = view.camZ;
@@ -86,7 +86,7 @@ final class DetailCoverage {
 
     /** A rough tile completely inside the ring, whose whole area is already shown, does not need to be drawn. */
     boolean coversTile(TilePos pos) {
-        return pos.farthestDistanceTo(this.camX, this.camZ) <= this.radius - this.fade && this.missingIn(pos) == 0;
+        return pos.farthestDistanceTo(this.camX, this.camZ) <= this.radius && this.missingIn(pos) == 0 && this.missingIn(pos) == 0;
     }
 
 }

@@ -764,8 +764,6 @@ abstract class LodLayer {
     private void draw(TileMesh mesh, double distance) {
         mesh.lastUsedTick = this.tick;
         mesh.discardRadius = 0.0F;
-        mesh.keepRadius = 0.0F;
-        mesh.fadeWidth = 0.0F;
         this.nextDrawList.add(mesh);
         boolean changed = mesh.changedAt > mesh.receivedAt && this.now - mesh.receivedAt > CHANGED_REFRESH_MS;
         if (changed && this.changeVisible(mesh)) {

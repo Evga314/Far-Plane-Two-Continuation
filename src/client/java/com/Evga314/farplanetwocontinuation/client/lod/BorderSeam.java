@@ -72,29 +72,37 @@ final class BorderSeam implements AutoCloseable {
 
     /**
      * What a rough tile keeps of its samples for the seam: per sample the drawn height and the level of its water, two unsigned
-     * shorts in one int (the height low), its color and its material and flags; see {@link #extract}. Kept on the CPU only.
+     * shorts in one int (the height low), its color and its material and flags; and per sample of its four edges the bottom of its
+     * skirt, packed the same way, edge by edge as the mesh writes them (north, south, west, east); see {@link #extract}. Kept on
+     * the CPU only.
      * <p>
      * Что грубый тайл хранит от своих отсчётов для шва: на отсчёт нарисованная высота и уровень его воды, два беззнаковых short в
-     * одном int (высота - младший), его цвет и его материал с флагами; см. {@link #extract}. Хранится только в обычной памяти.
+     * одном int (высота - младший), его цвет и его материал с флагами; и на отсчёт его четырёх краёв - низ его юбки, упаковано так
+     * же, край за краем, как их пишет меш (север, юг, запад, восток); см. {@link #extract}. Хранится только в обычной памяти.
      */
-    record Samples(int[] heights, int[] colors, byte[] bits) {
+    record Samples(int[] heights, int[] colors, byte[] bits, int[] skirts) {
     }
 
     /**
      * Takes the seam's data out of a rough tile's own-format mesh: the grid vertices are written first, in sample order (see
-     * SurfaceMesher), so sample {@code i} is vertex {@code i}. Null for the floating islands of the End, whose vertices are laid
-     * out differently; the seam is not sewn from them. Called in the mesh builder threads.
+     * SurfaceMesher), so sample {@code i} is vertex {@code i}, and the bottoms of the skirts follow them, edge by edge. Null for
+     * the floating islands of the End, whose vertices are laid out differently; the seam is not sewn from them. Called in the
+     * mesh builder threads.
      * <p>
      * Достаёт данные шва из меша грубого тайла в собственном формате: вершины решётки пишутся первыми, в порядке отсчётов (см.
-     * SurfaceMesher), поэтому отсчёт {@code i} - это вершина {@code i}. Null для плавающих островов Края, чьи вершины разложены
-     * иначе; из них шов не шьётся. Вызывается в потоках построения мешей.
+     * SurfaceMesher), поэтому отсчёт {@code i} - это вершина {@code i}, а за ними идут низы юбок, край за краем. Null для
+     * плавающих островов Края, чьи вершины разложены иначе; из них шов не шьётся. Вызывается в потоках построения мешей.
      */
     static @Nullable Samples extract(@Nullable SurfaceMesh mesh) {
         if (mesh == null || !mesh.sharedGround()) {
             return null;
         }
+        int side = FarPlaneConstants.TILE_SAMPLES;
+        int count = side * side;
+        if (mesh.vertexCount() < count + 4 * side) {
+            return null;
+        }
         ByteBuffer vertices = mesh.vertices();
-        int count = FarPlaneConstants.TILE_SAMPLES * FarPlaneConstants.TILE_SAMPLES;
         int[] heights = new int[count];
         int[] colors = new int[count];
         byte[] bits = new byte[count];
@@ -104,7 +112,12 @@ final class BorderSeam implements AutoCloseable {
             colors[i] = rgba(vertices, at + LodVertex.COLOR);
             bits[i] = vertices.get(at + LodVertex.BITS);
         }
-        return new Samples(heights, colors, bits);
+        int[] skirts = new int[4 * side];
+        for (int i = 0; i < skirts.length; i++) {
+            int at = (count + i) * LodVertex.SIZE;
+            skirts[i] = (vertices.getShort(at + LodVertex.Y) & 0xFFFF) | (vertices.getShort(at + LodVertex.WATER_LEVEL) & 0xFFFF) << 16;
+        }
+        return new Samples(heights, colors, bits, skirts);
     }
 
     /** RGBA bytes as ARGB, as PackMesher reads them. / Байты RGBA как ARGB, как их читает PackMesher. */
@@ -193,10 +206,15 @@ final class BorderSeam implements AutoCloseable {
     private final float[] ourWl = new float[17];
     private final int[] ourColor = new int[17];
     private final byte[] ourBits = new byte[17];
-    private final float[] vanWX = new float[17];
-    private final float[] vanWZ = new float[17];
-    private final float[] vanY = new float[17];
-    private final float[] vanWl = new float[17];
+    private final float[] vanWX = new float[33];
+    private final float[] vanWZ = new float[33];
+    private final float[] vanT = new float[33];
+    private final float[] vanY = new float[33];
+    private final float[] vanWl = new float[33];
+    /** How many points the step profile of the segment being sewn has, and the ground and water of its columns before the expansion. / Сколько точек у ступенчатого профиля отрезка в работе, и земля с водой его колонок до разворота. */
+    private int vanCount;
+    private final float[] colY = new float[17];
+    private final float[] colWl = new float[17];
     /** The vanilla chunks read in this sewing, so a chunk bordering the seam on two sides is read once. / Чанки ваниллы, прочитанные в этом шитье, чтобы чанк, граничащий со швом с двух сторон, читался один раз. */
     private final Long2ObjectOpenHashMap<ChunkAccess> chunkCache = new Long2ObjectOpenHashMap<>();
     private final BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
@@ -256,7 +274,8 @@ final class BorderSeam implements AutoCloseable {
     }
 
     /**
-     * Finds the segments of the seam: the chunk columns the rough terrain draws as its own, with settled vanilla next door. For
+     * Finds the segments of the seam: the chunk columns the rough terrain draws as its own, with vanilla next door, settled or
+     * being handed over this very frame. For
      * every one, the tile of the frame that draws the column at the finest level there, or none (the segment is then left out: a
      * tile still loading shows the usual pop-in, not a hole sewn to nothing). Returns a print of the segments and their tiles.
      * <p>
@@ -281,7 +300,16 @@ final class BorderSeam implements AutoCloseable {
                     continue;
                 }
                 for (int dir = 0; dir < 4; dir++) {
-                    if (ownership.owner(cx + SIDE_X[dir], cz + SIDE_Z[dir]) != OwnershipMap.VANILLA) {
+                    // Vanilla's column counts from the very frame Sodium draws it (HANDOVER), not once it has stood for
+                    // HANDOVER_MS: the wedge along its edge is open from that frame, and the seam closes it in the same frame.
+                    // The map itself is fed frame by frame from what Sodium draws (see LodManager.frameCheck and SodiumFrame),
+                    // so no waiting is built into the seam.
+                    // / Колонка ваниллы считается с того самого кадра, как Sodium её нарисовал (HANDOVER), а не когда она
+                    // простояла HANDOVER_MS: клин вдоль её кромки открыт с этого кадра, и шов закрывает его в том же кадре.
+                    // Сама карта питается покадрово тем, что рисует Sodium (см. LodManager.frameCheck и SodiumFrame), поэтому
+                    // ожидания в шов не встроено.
+                    byte neighbour = ownership.owner(cx + SIDE_X[dir], cz + SIDE_Z[dir]);
+                    if (neighbour != OwnershipMap.VANILLA && neighbour != OwnershipMap.HANDOVER) {
                         continue;
                     }
                     int tile = this.covering(byPos, tiles, parts, cx, cz);
@@ -396,24 +424,52 @@ final class BorderSeam implements AutoCloseable {
         boolean xEdge = SIDE_X[dir] != 0;
         float planeX = (cx + (SIDE_X[dir] > 0 ? 1 : 0)) * 16.0F - SIDE_X[dir] * OVERLAP;
         float planeZ = (cz + (SIDE_Z[dir] > 0 ? 1 : 0)) * 16.0F - SIDE_Z[dir] * OVERLAP;
-        // Vanilla's profile, block by block along its edge. / Профиль ваниллы, блок за блоком вдоль её кромки.
-        for (int k = 0; k <= 16; k++) {
+        // Vanilla's profile: the ground of every column along its edge, then the columns opened out into the true step profile:
+        // across a column its top runs level, at the column's far side it jumps straight to the next column's top. Joining the
+        // column tops corner to corner instead left a diagonal over every rising step, and under the diagonal a triangle of sky
+        // the width of one block and the height of the step.
+        // / Профиль ваниллы: земля каждой колонки вдоль её кромки, затем колонки разворачиваются в настоящий ступенчатый
+        // профиль: поперёк колонки её верх идёт ровно, у дальнего края колонки прыгает прямо к верху следующей. Соединение
+        // верхов колонок угол к углу вместо этого оставляло диагональ над каждой восходящей ступенькой, а под диагональю -
+        // треугольник неба шириной в один блок и высотой в ступеньку.
+        for (int k = 0; k < 16; k++) {
             int localX;
             int localZ;
             if (xEdge) {
                 localX = SIDE_X[dir] > 0 ? 0 : 15;
-                localZ = Math.min(k, 15);
+                localZ = k;
             } else {
                 localZ = SIDE_Z[dir] > 0 ? 0 : 15;
-                localX = Math.min(k, 15);
+                localX = k;
             }
             this.vanillaColumn(level, chunk, localX, localZ, k);
+        }
+        int m = 0;
+        this.vanT[m] = 0.0F;
+        this.vanY[m] = this.colY[0];
+        this.vanWl[m] = this.colWl[0];
+        m++;
+        for (int k = 0; k < 16; k++) {
+            this.vanT[m] = k + 1.0F;
+            this.vanY[m] = this.colY[k];
+            this.vanWl[m] = this.colWl[k];
+            m++;
+            if (k < 15) {
+                this.vanT[m] = k + 1.0F;
+                this.vanY[m] = this.colY[k + 1];
+                this.vanWl[m] = this.colWl[k + 1];
+                m++;
+            }
+        }
+        this.vanCount = m;
+        for (int p = 0; p < m; p++) {
+            float t = extended(this.vanT[p]);
             if (xEdge) {
-                this.vanWX[k] = planeX;
-                this.vanWZ[k] = cz * 16.0F + extended(k);
+                this.vanWX[p] = planeX;
+                this.vanWZ[p] = cz * 16.0F + t;
             } else {
-                this.vanWX[k] = cx * 16.0F + extended(k);
-                this.vanWZ[k] = planeZ;
+                this.vanWX[p] = cx * 16.0F + t;
+                this.vanWZ[p] = planeZ;
             }
         }
         // Our profile: the tile's samples along the same side, at the heights they are drawn. A tile coarser than a chunk has no
@@ -491,6 +547,46 @@ final class BorderSeam implements AutoCloseable {
                 }
             }
         }
+        // Where the segment runs along the tile's own edge, the tile's skirt already hangs there in the border's plane, down to
+        // the bottom the mesh gave it; in the pack's format the seam falls into that same plane exactly (its positions are whole
+        // blocks), and two surfaces in one plane show through each other tooth by tooth and flicker. There the seam's side starts
+        // at the skirt's bottom instead of at the surface, so the two never share a band: the skirt covers the upper part of the
+        // wedge, the seam the rest.
+        // / Где отрезок идёт вдоль собственного края тайла, там в плоскости границы уже висит юбка тайла, до того низа, который
+        // дал ей меш; в формате пака шов попадает ровно в ту же плоскость (его позиции - целые блоки), а две поверхности в одной
+        // плоскости просвечивают друг сквозь друга зубцами и мерцают. Там сторона шва начинается от низа юбки, а не от
+        // поверхности, и они никогда не делят полосу: юбка закрывает верх клина, шов - остальное.
+        if (mesh.seamSkirts != null) {
+            int skirtEdge = -1;
+            float along0 = 0.0F;
+            if (xEdge) {
+                long edgeLine = (cx + (SIDE_X[dir] > 0 ? 1 : 0)) * 16L;
+                if (edgeLine == minX) {
+                    skirtEdge = 2;
+                } else if (edgeLine == minX + mesh.pos.size()) {
+                    skirtEdge = 3;
+                }
+                along0 = (cz * 16L - minZ) / (float) spacing;
+            } else {
+                long edgeLine = (cz + (SIDE_Z[dir] > 0 ? 1 : 0)) * 16L;
+                if (edgeLine == minZ) {
+                    skirtEdge = 0;
+                } else if (edgeLine == minZ + mesh.pos.size()) {
+                    skirtEdge = 1;
+                }
+                along0 = (cx * 16L - minX) / (float) spacing;
+            }
+            if (skirtEdge >= 0) {
+                for (int k = 0; k <= steps; k++) {
+                    float at = along0 + this.ourT[k] / spacing;
+                    float skirtY = tileBaseY + skirtHalf(mesh.seamSkirts, skirtEdge, at, false) / LodVertex.Y_UNITS;
+                    if (skirtY < this.ourY[k]) {
+                        this.ourY[k] = skirtY;
+                        this.ourWl[k] = tileBaseY + skirtHalf(mesh.seamSkirts, skirtEdge, at, true) / LodVertex.Y_UNITS;
+                    }
+                }
+            }
+        }
         // The zipper itself: walk both profiles, always taking the next point of whichever comes first along the border; vanilla's
         // points take the color and material of our nearest sample, so the strip reads as the far terrain's own side everywhere.
         // / Сама молния: идём по обоим профилям, всегда беря следующую точку того, кто идёт первым вдоль границы; точки ваниллы берут
@@ -503,8 +599,8 @@ final class BorderSeam implements AutoCloseable {
         int prevVan = this.point(this.vanWX[0], this.vanY[0], this.vanWZ[0], this.vanWl[0], color, bits, rdx, rdz);
         int i = 1;
         int j = 1;
-        while (i <= steps || j <= 16) {
-            boolean ours = j > 16 || i <= steps && this.ourT[i] <= j;
+        while (i <= steps || j < this.vanCount) {
+            boolean ours = j >= this.vanCount || i <= steps && this.ourT[i] <= this.vanT[j];
             if (ours) {
                 color = this.ourColor[i];
                 bits = this.ourBits[i];
@@ -538,11 +634,11 @@ final class BorderSeam implements AutoCloseable {
     }
 
     /**
-     * The ground of one column of vanilla's edge, and the level of its water, into {@link #vanY} and {@link #vanWl} at {@code k}:
+     * The ground of one column of vanilla's edge, and the level of its water, into {@link #colY} and {@link #colWl} at {@code k}:
      * down from the top block through water and what stands in it to the first whole block, as VanillaWall looks for the ground
      * under its walls (plants and corals stand on the ground; they are not the ground itself).
      * <p>
-     * Земля одной колонки кромки ваниллы и уровень её воды, в {@link #vanY} и {@link #vanWl} по индексу {@code k}: вниз от верхнего
+     * Земля одной колонки кромки ваниллы и уровень её воды, в {@link #colY} и {@link #colWl} по индексу {@code k}: вниз от верхнего
      * блока сквозь воду и то, что в ней стоит, до первого целого блока, как VanillaWall ищет землю под своими стенами (растения и
      * кораллы стоят на земле; сами они землёй не являются).
      */
@@ -563,8 +659,8 @@ final class BorderSeam implements AutoCloseable {
             y--;
         }
         float ground = y + 1;
-        this.vanY[k] = ground;
-        this.vanWl[k] = water ? top + VANILLA_WATER_FILL : ground;
+        this.colY[k] = ground;
+        this.colWl[k] = water ? top + VANILLA_WATER_FILL : ground;
     }
 
     /** Adds a point of the seam and returns its number. / Добавляет точку шва и возвращает её номер. */
@@ -749,6 +845,21 @@ final class BorderSeam implements AutoCloseable {
 
     private static int clamp(int value, int min, int max) {
         return value < min ? min : value > max ? max : value;
+    }
+
+    /**
+     * One half (the height, or the water level above it) of a tile's skirt bottoms along an edge, read between the edge's samples
+     * at {@code at} samples from its start. / Одна половина (высота или уровень воды над ней) низов юбки тайла вдоль края,
+     * прочитанная между отсчётами края в точке {@code at} отсчётов от его начала.
+     */
+    private static float skirtHalf(int[] skirts, int edge, float at, boolean high) {
+        int i0 = clamp((int) Math.floor(at), 0, FarPlaneConstants.TILE_CELLS - 1);
+        float frac = at - i0;
+        int a = skirts[edge * FarPlaneConstants.TILE_SAMPLES + i0];
+        int b = skirts[edge * FarPlaneConstants.TILE_SAMPLES + i0 + 1];
+        float va = high ? a >>> 16 : a & 0xFFFF;
+        float vb = high ? b >>> 16 : b & 0xFFFF;
+        return va + (vb - va) * frac;
     }
 
     /** The bilinear reading of four samples, as TileMesh.heightAt reads the heights. / Билинейное чтение четырёх отсчётов, как TileMesh.heightAt читает высоты. */

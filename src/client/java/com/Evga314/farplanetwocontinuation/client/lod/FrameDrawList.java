@@ -143,10 +143,10 @@ final class FrameDrawList implements AutoCloseable {
         if (this.frames == null) {
             this.frames = new DynamicGpuDataStorageMapped<>("FarPlane surface frame", FrameData.SIZE, GpuBuffer.USAGE_UNIFORM, 1);
             this.tileStorage = new DynamicGpuDataStorageMapped<>("FarPlane surface tiles", TileData.SIZE, GpuBuffer.USAGE_UNIFORM, 128);
-            this.seam.beginFrame();
         }
         this.frames.endFrame();
         this.tileStorage.endFrame();
+        this.seam.beginFrame();
         this.camX = camX;
         this.camY = camY;
         this.camZ = camZ;

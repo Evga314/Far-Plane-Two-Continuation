@@ -456,7 +456,7 @@ final class DetailMeshBuilder {
             }
             return new GeneralMeshFactory.Built(
                 key, epoch, vertices, minY, maxY, minY, null, out.quads * 6, true, coverage(this.data, this.cell), this.data.isComplete(), segments,
-                    chunkSurfaces, this.detail.textured(), out.water, chunkPlants, out.cutout, null, null, null, null
+                    chunkSurfaces, this.detail.textured(), out.water, chunkPlants, out.cutout, null, null, null, null, null
             );
         }
 

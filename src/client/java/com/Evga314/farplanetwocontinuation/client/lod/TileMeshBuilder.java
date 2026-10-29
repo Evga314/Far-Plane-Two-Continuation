@@ -525,9 +525,8 @@ public final class TileMeshBuilder {
             return new GeneralMeshFactory.Built(key, epoch, surface.combined(), Math.min(minY - deepest, surface.baseY()), maxY, minY, tileHeights,
                     surface.indexCount(), false, 0L, true, null, null, false, tile.hasWater(), null, false, tile,
                     seamSamples == null ? null : seamSamples.heights(), seamSamples == null ? null : seamSamples.colors(),
-                    seamSamples == null ? null : seamSamples.bits());
-        }
-        return new GeneralMeshFactory.Built(key, epoch, buffer, minY - deepest, maxY, minY, tileHeights, indexCount, false, 0L, true, null, null, false, false, null, false, null, null, null, null);    }
+                    seamSamples == null ? null : seamSamples.bits(), seamSamples == null ? null : seamSamples.skirts());        }
+        return new GeneralMeshFactory.Built(key, epoch, buffer, minY - deepest, maxY, minY, tileHeights, indexCount, false, 0L, true, null, null, false, false, null, false, null, null, null, null, null);    }
 
     /** The depth of water whose depth the server did not send, in blocks. */
     private static final int UNKNOWN_WATER_DEPTH = 4;

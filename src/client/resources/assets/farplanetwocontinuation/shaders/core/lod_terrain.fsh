@@ -128,10 +128,15 @@ vec4 blockTexture(float blur) {
 }
 #endif
 
-#ifdef WATER_PASS
+// Under water with its fog off a wall in the color of that fog closes the view at the edge of the detailed tiles: TextureMat[3][0] is its
+// radius (0 without), [3][1] the water surface, [3][2] how much darker it gets with the camera deeper down, [0][1] the camera height.
+// Lower down it gets darker like the sea, and the terrain fades into it from WALL_FADE_START of the radius on. See LodRenderer.
+const float WALL_FADE_START = 0.7;
+const float WALL_DEEPEST = 0.2;
+const float WALL_DARKENING_DEPTH = 20.0;
 
-
-vec3 wallColor(float worldY) {
+vec3 wallColor(float worldY)
+{
     float depth = max(TextureMat[3][1] - worldY, 0.0);
     return FogColor.rgb * TextureMat[3][2] * mix(WALL_DEEPEST, 1.0, exp(-depth / WALL_DARKENING_DEPTH));
 }

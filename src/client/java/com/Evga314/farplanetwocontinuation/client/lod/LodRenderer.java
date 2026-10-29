@@ -372,26 +372,19 @@ public final class LodRenderer {
             .build()
     );
 
-    /**
-     * The fading edge of the detailed tiles, blended over the rough terrain under it. It writes depth, so of a detailed tile only its
-     * front faces blend in, not the ground behind its trees as well.
-     */
-    public static final RenderPipeline DETAIL_TEXTURED_FADE_PIPELINE = RenderPipelines.registerOptional(
-        RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
-            .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_detail_textured_fade"))
-            .withVertexShader(SHADER)
-            .withFragmentShader(SHADER)
-            .withShaderDefine("LIGHTMAP")
-            .withBindGroupLayout(BindGroupLayouts.SAMPLER2)
-            .withShaderDefine("TEXTURED")
-            .withShaderDefine("FADE_PASS")
-            .withBindGroupLayout(BindGroupLayouts.SAMPLER0)
-            .withVertexBinding(0, TEXTURED_FORMAT)
-            .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
-            .withColorTargetState(new ColorTargetState(BlendFunction.TRANSLUCENT))
-            .withDepthStencilState(DepthStencilState.DEFAULT)
-            .withCull(true)
-            .build()
+    public static final RenderPipeline DEPTH_DETAIL_TEXTURED_PIPELINE = RenderPipelines.registerOptional(
+            RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
+                    .withLocation(Identifier.fromNamespaceAndPath(FarPlaneConstants.MOD_ID, "pipeline/lod_terrain_detail_textured_depth"))
+                    .withVertexShader(SHADER)
+                    .withFragmentShader(SHADER)
+                    .withShaderDefine("DEPTH_ONLY")
+                    .withShaderDefine("TEXTURED")
+                    .withVertexBinding(0, TEXTURED_FORMAT)
+                    .withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
+                    .withColorTargetState(new ColorTargetState(Optional.empty(), GpuFormat.RGBA8_UNORM, 0))
+                    .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true))
+                    .withCull(true)
+                    .build()
     );
 
     public static final RenderPipeline DEPTH_DETAIL_PIPELINE = RenderPipelines.registerOptional(
@@ -410,7 +403,7 @@ public final class LodRenderer {
 
     static {
         java.util.Collections.addAll(LIT_PIPELINES, PIPELINE, SOLID_PIPELINE, FLOATING_PIPELINE, UNDER_DETAIL_PIPELINE, DETAIL_PIPELINE,
-            DETAIL_TEXTURED_PIPELINE, DETAIL_SOLID_PIPELINE, DETAIL_TEXTURED_SOLID_PIPELINE, DETAIL_WATER_PIPELINE, DETAIL_TEXTURED_FADE_PIPELINE);
+            DETAIL_TEXTURED_PIPELINE, DETAIL_SOLID_PIPELINE, DETAIL_TEXTURED_SOLID_PIPELINE, DETAIL_WATER_PIPELINE);
     }
 
     private final LodManager manager;
@@ -800,8 +793,6 @@ public final class LodRenderer {
             cut.m22(mesh.detail ? 1.0F : ROUGH_DEPTH_PRIORITY + ROUGH_LEVEL_PRIORITY * mesh.pos.level());
             // [2][1]: within this horizontal distance rough tiles lie under detailed ones and are pushed much farther back, see the shader.
             cut.m21(mesh.detail ? DebugToggles.surface ? -1.0F : 0.0F : underRadius);
-            // [2][0]: the edge of the detailed tiles, where their water turns into the flat water of the rough terrain.
-            cut.m20(mesh.detail ? ringRadius : 0.0F);
             cut.m33(overworldSky);
             // [1][0]: the texture level textured detailed tiles always use, below 0 for vanilla's choice by distance; for rough tiles 1
             // while the walls along vanilla's edge are drawn, which then leave no use for the rough water under vanilla's chunks.
@@ -1087,6 +1078,42 @@ public final class LodRenderer {
         int kind = !mesh.detail ? KIND_ROUGH : mesh.textured ? KIND_TEXTURED : KIND_DETAIL;
         return kind * 2 + (mesh.solid ? 0 : 1);
     }
+
+    /**
+     * The pipelines of one pass: rough tiles, detailed tiles in flat colors and detailed tiles with block textures. A water pass only
+     * draws the tiles with translucent water.
+     */
+    private record Pipelines(
+            @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
+            boolean waterOnly, @Nullable CompiledRenderPipeline @Nullable [] solid, boolean skipSolid
+    ) {
+        Pipelines(
+                @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
+                boolean waterOnly
+        ) {
+            this(rough, detail, textured, bindAtlas, waterOnly, null, false);
+        }
+
+        Pipelines(
+                @Nullable CompiledRenderPipeline rough, @Nullable CompiledRenderPipeline detail, @Nullable CompiledRenderPipeline textured, boolean bindAtlas,
+                boolean waterOnly, @Nullable CompiledRenderPipeline @Nullable [] solid
+        ) {
+            this(rough, detail, textured, bindAtlas, waterOnly, solid, false);
+        }
+
+        /** The pipeline of a {@link #drawKind}: the one that never drops fragments for solid tiles, where this pass has one. */
+        @Nullable CompiledRenderPipeline of(int drawKind) {
+            int kind = drawKind / 2;
+            if (drawKind % 2 == 0 && this.skipSolid) {
+                return null;
+            }
+            if (drawKind % 2 == 0 && this.solid != null && this.solid[kind] != null) {
+                return this.solid[kind];
+            }
+            return kind == KIND_ROUGH ? this.rough : kind == KIND_DETAIL ? this.detail : this.textured;
+        }
+    }
+
 
     /**
      * Whether nothing of a tile is cut away this frame: no part closer than its inner cut,., no sections vanilla

@@ -129,24 +129,8 @@ vec4 blockTexture(float blur) {
 #endif
 
 #ifdef WATER_PASS
-// The average color of the texture, from its smallest mipmap: the rough terrain paints water in it, see TileColors.
-vec3 spriteAverage() {
-    vec2 atlasSize = vec2(textureSize(Sampler0, 0));
-    return textureLod(Sampler0, (sprite.xy + sprite.zw * 0.5) / atlasSize, 4.0).rgb;
-}
 
-// Where the water of detailed tiles starts to turn into rough water, as a share of the radius of the detailed tiles.
-const float WATER_FADE_START = 0.7;
-// Brightness of the rough terrain's water against the plain water color, see TileColors and TileMeshBuilder.WATER_SHADE.
-const float ROUGH_WATER_SHADE = 0.85 * 0.92;
-#endif
 
-// Under water with its fog off a wall in the color of that fog closes the view at the edge of the detailed tiles: TextureMat[3][0] is its
-// radius (0 without), [3][1] the water surface, [3][2] how much darker it gets with the camera deeper down, [0][1] the camera height.
-// Lower down it gets darker like the sea, and the terrain fades into it from WALL_FADE_START of the radius on. See LodRenderer.
-const float WALL_FADE_START = 0.7;
-const float WALL_DEEPEST = 0.2;
-const float WALL_DARKENING_DEPTH = 20.0;
 vec3 wallColor(float worldY) {
     float depth = max(TextureMat[3][1] - worldY, 0.0);
     return FogColor.rgb * TextureMat[3][2] * mix(WALL_DEEPEST, 1.0, exp(-depth / WALL_DARKENING_DEPTH));
@@ -206,14 +190,9 @@ void main() {
     fragColor = vec4(0.0);
 }
 #else
-// TextureMat[0][0]: drop fragments closer than this (covered by detailed tiles); TextureMat[1][1]: drop fragments farther than this;
-// TextureMat[1][3]: over this width inside the outer cut detailed tiles fade into the rough terrain under them: the opaque pass leaves
-// the band out, the fade pass (FADE_PASS) blends it over the rough terrain and blurs its textures more and more towards the edge;
+// TextureMat[0][0]: drop fragments closer than this (covered by detailed tiles);
 // TextureMat[3][3]: 1 under the overworld sky, 0 in skies without its sky disc; TextureMat[3].xyz is then the
 // color distant terrain fades into, matching that sky instead of the fog color.
-// TextureMat[0][3]: 1 drops the sections vanilla draws itself: TextureMat[1][2] holds them as one bit each, from section TextureMat[0][2]
-// up; TextureMat[0][1] is the camera height, which turns positions back into world heights. A top face right on a section border
-// belongs to the section below it.
 void main() {
 #ifdef WATER_WALL
     fragColor = vec4(wallColor(relativePosition.y + TextureMat[0][1]), 1.0);
@@ -246,23 +225,11 @@ void main() {
     }
 #endif
     float horizontal = length(relativePosition.xz);
-#ifdef UNDER_DETAIL
+#ifndef UNDER_DETAIL
     // The patch under vanilla's and the detailed tiles' water is not cut where they draw: it is what shows through their gaps.
-    if (TextureMat[1][1] > 0.0 && horizontal > TextureMat[1][1]) {
-#else
-    if (horizontal < TextureMat[0][0] || (TextureMat[1][1] > 0.0 && horizontal > TextureMat[1][1])) {
-#endif
-        DROP;
-    }
-    float fade = TextureMat[1][3] > 0.0 ? clamp((horizontal - TextureMat[1][1] + TextureMat[1][3]) / TextureMat[1][3], 0.0, 1.0) : 0.0;
-#ifdef FADE_PASS
-    if (fade <= 0.0) {
-        DROP;
-    }
-#elif !defined(WATER_PASS)
-    if (fade > 0.0) {
-        DROP;
-    }
+if (horizontal < TextureMat[0][0]) {
+DROP;
+}
 #endif
     if (TextureMat[0][3] > 0.5) {
         float worldY = relativePosition.y + TextureMat[0][1];
@@ -364,19 +331,11 @@ void main() {
         DROP;
     }
 #endif
-    vec4 texel = blockTexture(fade);
+    vec4 texel = blockTexture(0.0);
     surface = vec4(texel.rgb * vertexColor.rgb, 1.0);
 #ifdef WATER_PASS
     // As opaque as vanilla's water, which takes the alpha of its texture as it is (that of a resource pack too).
     surface.a = texel.a;
-    // Towards the edge of the detailed tiles (TextureMat[2][0]) the water turns into the flat, opaque water of the rough terrain
-    // beyond it, so there is no second edge where the seabed suddenly stops showing.
-    if (TextureMat[2][0] > 0.0) {
-        float edge = smoothstep(TextureMat[2][0] * WATER_FADE_START, TextureMat[2][0], horizontal);
-        // The new renderer's rough water is translucent too (TextureMat[2][1] below 0): only the color turns into it.
-        float roughAlpha = TextureMat[2][1] < 0.0 ? surface.a : 1.0;
-        surface = mix(surface, vec4(vertexColor.rgb * spriteAverage() * ROUGH_WATER_SHADE, roughAlpha), edge);
-    }
     // In the fading edge the water has already turned into the rough water beyond it: it stays, so the seabed fading out under it
     // is not seen bare, lighter than both.
 #endif
@@ -390,9 +349,6 @@ void main() {
     float renderDistance = FogCloudsEnd > 0.5 ? sphericalDistance : cylindricalDistance;
     vec4 color = apply_fog(surface, sphericalDistance, renderDistance, FogEnvironmentalStart, FogEnvironmentalEnd, FogRenderDistanceStart, FogRenderDistanceEnd, fogColor);
 
-#ifdef FADE_PASS
-    surface.a = 1.0 - fade;
-#endif
     vec3 result = color.rgb;
     if (TextureMat[3][3] > 0.5 && TextureMat[3][0] > 0.0) {
         float wall = smoothstep(TextureMat[3][0] * WALL_FADE_START, TextureMat[3][0], horizontal);

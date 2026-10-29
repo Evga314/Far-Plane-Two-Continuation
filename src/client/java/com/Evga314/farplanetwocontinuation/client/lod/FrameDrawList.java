@@ -1,5 +1,6 @@
 package com.Evga314.farplanetwocontinuation.client.lod;
 
+import com.Evga314.farplanetwocontinuation.FarPlaneConstants;
 import com.Evga314.farplanetwocontinuation.client.lod.surface.LodVertex;
 import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceIndices;
 import com.Evga314.farplanetwocontinuation.client.lod.surface.SurfaceTile;
@@ -116,6 +117,12 @@ final class FrameDrawList implements AutoCloseable {
     private final List<TileMesh> seamDetailTiles = new ArrayList<>();
     private boolean[] vanillaColumns = new boolean[0];
     private boolean[] detailedColumns = new boolean[0];
+    /** The span of the ownership map and the inputs its columns were last filled from; they are refilled only when one changes. / Размах карты владения и вводные, из которых её колонки заполнялись в последний раз; они перезаполняются, только когда что-то из них меняется. */
+    private int ownerHalf = -1;
+    private int ownerOriginX;
+    private int ownerOriginZ;
+    private int ownerMaskVersion = -1;
+    private int ownerDetailVersion = -1;
     /** What one draw call of a tile's ranges takes, kept. */
     private PointerBuffer offsets = MemoryUtil.memAllocPointer(256);
     private IntBuffer counts = MemoryUtil.memAllocInt(256);
@@ -248,44 +255,126 @@ final class FrameDrawList implements AutoCloseable {
         return this.counts;
     }
 
-    /** The owners of this frame, from what vanilla and the detailed tiles draw by the chunk mask, see {@link OwnershipMap}. */
+    /** The owners of this frame, from what vanilla and the detailed tiles draw, see {@link OwnershipMap}. */
     private void updateOwnership(LodManager.ChunkMask mask) {
         int half = mask.half();
-        int side = 2 * half + 1;
-        int[] values = mask.values();
-        if (half < 0 || values.length != side * side) {
+        if (half < 0 || mask.values().length != (2 * half + 1) * (2 * half + 1)) {
             this.ownership.update(-1, 0, 0, this.vanillaColumns, this.detailedColumns, 0L);
             return;
         }
-        if (this.vanillaColumns.length != values.length) {
-            this.vanillaColumns = new boolean[values.length];
-            this.detailedColumns = new boolean[values.length];
+        // The map spans more than the chunk mask. The mask is made around vanilla's drawn chunks and ends a few chunks past
+        // them, while the detailed ring reaches much farther; outside a map every column counts as the rough terrain's own,
+        // so the detailed tiles past the mask's edge kept their rough terrain - its ground, its water and its tree tops -
+        // because no one told the map they were there. The map stays centred on the mask, wide enough for the whole ring.
+        // / Карта шире маски чанков. Маска строится вокруг рисуемых ваниллой чанков и кончается в нескольких чанках за ними,
+        // а детальное кольцо тянется намного дальше; вне карты каждая колонка считается собственной для дальнего ландшафта,
+        // поэтому детальные тайлы за краем маски сохраняли свой дальний ландшафт - его землю, его воду и его верхушки
+        // деревьев: никто не говорил карте, что они там. Карта остаётся центрированной на маске и достаточно широкой для
+        // всего кольца.
+        int ring = (int) Math.ceil(this.manager.detailRingRadius() / 16.0);
+        int wide = Math.max(half, ring) + 2;
+        int detailVersion = this.manager.detailVersion();
+        if (wide != this.ownerHalf || mask.originX() != this.ownerOriginX || mask.originZ() != this.ownerOriginZ
+            || mask.version() != this.ownerMaskVersion || detailVersion != this.ownerDetailVersion) {
+            this.ownerHalf = wide;
+            this.ownerOriginX = mask.originX();
+            this.ownerOriginZ = mask.originZ();
+            this.ownerMaskVersion = mask.version();
+            this.ownerDetailVersion = detailVersion;
+            this.fillColumns(mask, wide);
         }
-        for (int i = 0; i < values.length; i++) {
-            int value = values[i];
-            this.vanillaColumns[i] = (value & (LodManager.ChunkMask.VANILLA | LodManager.ChunkMask.VANILLA_EDGE)) != 0;
-            this.detailedColumns[i] = (value & LodManager.ChunkMask.DETAILED) != 0;
+        this.ownership.update(wide, mask.originX(), mask.originZ(), this.vanillaColumns, this.detailedColumns, Util.getMillis());
+    }
+
+    /**
+     * The vanilla and detailed columns of the widened map: both from the chunk mask where it reaches, and the detailed ones
+     * past its edge from the detailed tiles themselves, marked from their coverage the way the mask marks them (see
+     * LodManager's own marking of the same tiles).
+     * <p>
+     * Колонки ваниллы и детальных тайлов расширенной карты: обе - из маски чанков, где она достаёт, а детальные за её краем -
+     * из самих детальных тайлов, отмеченные по их покрытию так, как их отмечает маска (см. собственную разметку тех же
+     * тайлов в LodManager).
+     */
+    private void fillColumns(LodManager.ChunkMask mask, int wide) {
+        int side = 2 * wide + 1;
+        if (this.vanillaColumns.length != side * side) {
+            this.vanillaColumns = new boolean[side * side];
+            this.detailedColumns = new boolean[side * side];
+        } else {
+            Arrays.fill(this.vanillaColumns, false);
+            Arrays.fill(this.detailedColumns, false);
         }
-        this.ownership.update(half, mask.originX(), mask.originZ(), this.vanillaColumns, this.detailedColumns, Util.getMillis());
+        int maskHalf = mask.half();
+        int maskSide = 2 * maskHalf + 1;
+        int[] values = mask.values();
+        for (int z = 0; z < side; z++) {
+            int mz = z - wide + maskHalf;
+            if (mz < 0 || mz >= maskSide) {
+                continue;
+            }
+            for (int x = 0; x < side; x++) {
+                int mx = x - wide + maskHalf;
+                if (mx < 0 || mx >= maskSide) {
+                    continue;
+                }
+                int value = values[mx + mz * maskSide];
+                int at = x + z * side;
+                this.vanillaColumns[at] = (value & (LodManager.ChunkMask.VANILLA | LodManager.ChunkMask.VANILLA_EDGE)) != 0;
+                this.detailedColumns[at] = (value & LodManager.ChunkMask.DETAILED) != 0;
+            }
+        }
+        int square = FarPlaneConstants.tileSize(FarPlaneConstants.DETAIL_MIN_LEVEL);
+        int perSquare = square / 16;
+        for (TileMesh mesh : this.manager.detailTiles()) {
+            if (mesh.vertices.isClosed()) {
+                continue;
+            }
+            int squares = Math.max(1, mesh.pos.size() / square);
+            for (int s = 0; s < squares * squares; s++) {
+                if ((mesh.coverage & 1L << s) == 0) {
+                    continue;
+                }
+                long squareX = mesh.pos.minX() + (long) (s % squares) * square;
+                long squareZ = mesh.pos.minZ() + (long) (s / squares) * square;
+                for (int c = 0; c < perSquare * perSquare; c++) {
+                    long chunkMinX = squareX + (long) (c % perSquare) * 16L;
+                    long chunkMinZ = squareZ + (long) (c / perSquare) * 16L;
+                    int x = (int) Math.floorDiv(chunkMinX, 16L) - mask.originX() + wide;
+                    int z = (int) Math.floorDiv(chunkMinZ, 16L) - mask.originZ() + wide;
+                    if (x >= 0 && z >= 0 && x < side && z < side) {
+                        this.detailedColumns[x + z * side] = true;
+                    }
+                }
+            }
+        }
     }
 
     /**
      * What a tile draws of each of its chunk columns, by the owners of this frame. A tile farther above or below the camera than vanilla
-     * draws sections is all the rough terrain's: vanilla draws no ground of it (seen from high above, for one).
+     * draws sections keeps vanilla's columns - vanilla draws no ground of it there (seen from high above, for one) - but still leaves
+     * out the detailed tiles' columns: the detailed tiles draw at any height, so theirs are cut at any height too.
+     * <p>
+     * Что тайл рисует из каждой своей колонки чанков, по владельцам этого кадра. Тайл, который выше или ниже камеры дальше, чем
+     * ванилла рисует секции, сохраняет колонки ваниллы - ванилла там её землю не рисует (например, при взгляде с большой высоты), -
+     * но по-прежнему вырезает колонки детальных тайлов: детальные тайлы рисуются на любой высоте, поэтому и вырезаются на любой.
      */
     private void parts(TileMesh mesh, LodManager.ChunkMask mask, double camY, byte[] parts) {
         SurfaceTile surface = mesh.surface;
         int groups = surface.groups();
         Arrays.fill(parts, 0, groups * groups, OwnershipMap.OWN);
-        boolean withinReach = camY - mesh.maxY < mask.reach() && mesh.minY - camY < mask.reach();
-        if (groups == 1 || !withinReach) {
+        if (groups == 1) {
             return;
         }
+        boolean withinReach = camY - mesh.maxY < mask.reach() && mesh.minY - camY < mask.reach();
         long firstChunkX = Math.floorDiv(mesh.pos.minX(), 16L);
         long firstChunkZ = Math.floorDiv(mesh.pos.minZ(), 16L);
         for (int gz = 0; gz < groups; gz++) {
             for (int gx = 0; gx < groups; gx++) {
-                parts[gx + gz * groups] = this.ownership.part(firstChunkX + gx, firstChunkZ + gz);
+                long chunkX = firstChunkX + gx;
+                long chunkZ = firstChunkZ + gz;
+                parts[gx + gz * groups] = withinReach
+                    ? this.ownership.part(chunkX, chunkZ)
+                    : this.ownership.owner(chunkX, chunkZ) == OwnershipMap.DETAILED ? OwnershipMap.NONE : OwnershipMap.OWN;
             }
         }
     }

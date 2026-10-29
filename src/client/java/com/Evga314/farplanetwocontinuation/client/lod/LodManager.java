@@ -152,6 +152,16 @@ public final class LodManager {
         return this.detailRingRadius;
     }
 
+    /** The detailed tiles drawn now, for the frame's ownership map (see FrameDrawList). / Детальные тайлы, рисуемые сейчас, для карты владения кадра (см. FrameDrawList). */
+    List<TileMesh> detailTiles() {
+        return this.detail.drawList();
+    }
+
+    /** The version of the drawn detailed tiles, bumped when they change. / Версия рисуемых детальных тайлов, поднимается, когда они меняются. */
+    int detailVersion() {
+        return this.detail.drawListVersion();
+    }
+
     ChunkMask chunkMask() {
         return this.chunkMask;
     }

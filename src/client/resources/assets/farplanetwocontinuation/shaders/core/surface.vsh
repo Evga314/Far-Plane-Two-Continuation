@@ -34,12 +34,6 @@ void main() {
     vec3 pos = vec3(units.x * TileOffset.w, units.z / 16.0, units.y * TileOffset.w) + TileOffset.xyz;
     waterLevel = units.w / 16.0 + TileOffset.y;
     bool water = (extra.w & BIT_WATER) != 0;
-    // Closer than where tree tops start to rise, vanilla's chunks and the detailed tiles are drawn, and the tree tops would poke
-    // through them: there they lie flat.
-    if (Params.x > 0.0 && !water) {
-        float rise = smoothstep(Params.x, Params.x + max(48.0, Params.x * 0.3), length(pos.xz));
-        pos.y -= float(extra.z) * 0.25 * (1.0 - rise);
-    }
     vec4 view = ViewMat * vec4(pos, 1.0);
     gl_Position = ProjMat * vec4(view.xyz * TileParams.x, 1.0);
 #ifdef DEPTH

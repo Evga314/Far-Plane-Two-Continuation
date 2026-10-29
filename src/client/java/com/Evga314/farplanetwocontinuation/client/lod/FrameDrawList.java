@@ -109,6 +109,9 @@ final class FrameDrawList implements AutoCloseable {
     private final OwnershipMap ownership = new OwnershipMap();
     /** The seam sewn along the border of vanilla's columns, see BorderSeam. / Шов, сшитый вдоль границы колонок ваниллы, см. BorderSeam. */
     private final BorderSeam seam = new BorderSeam();
+    /** Scratch for the seam's draw runs of one call, and how many numbers of it are filled. / Черновик для отрезков отрисовки шва на один вызов и сколько чисел в нём заполнено. */
+    private int[] seamRunScratch = new int[256];
+    private int seamRunCount;
     /** The frame's detailed tiles with a kept edge, for the seam to sew the rough terrain to (see BorderSeam). / Детальные тайлы кадра с сохранённой кромкой, чтобы шов сшивал к ним дальний ландшафт (см. BorderSeam). */
     private final List<TileMesh> seamDetailTiles = new ArrayList<>();
     private boolean[] vanillaColumns = new boolean[0];
@@ -388,6 +391,26 @@ final class FrameDrawList implements AutoCloseable {
         return this.seam.packMesh();
     }
 
+    /** Works this frame's seam draw runs out (see BorderSeam.runs) into the scratch. / Считает отрезки отрисовки шва этого кадра (см. BorderSeam.runs) в черновик. */
+    private void computeSeamRuns() {
+        int need = this.seam.builtSegments() * 2;
+        if (this.seamRunScratch.length < need) {
+            this.seamRunScratch = new int[Math.max(need, 256)];
+        }
+        this.seamRunCount = this.seam.runs(this.ownership, this.seamRunScratch);
+    }
+
+    /** The seam's draw runs for a shader pack, in triangles (see BorderSeam.runs); {@link #seamRunLength} says how many numbers are filled. / Отрезки отрисовки шва для шейдерного пака, в треугольниках (см. BorderSeam.runs); {@link #seamRunLength} говорит, сколько чисел заполнено. */
+    int[] seamPackRuns() {
+        this.computeSeamRuns();
+        return this.seamRunScratch;
+    }
+
+    /** How many numbers of {@link #seamPackRuns} are filled. / Сколько чисел в {@link #seamPackRuns} заполнено. */
+    int seamRunLength() {
+        return this.seamRunCount;
+    }
+
     /**
      * Draws the border seam (see BorderSeam) with one of the surface's pipelines, the ground's or the depth's: for the pass the
      * seam is one more tile, with its own buffers and its own tile block.
@@ -406,11 +429,27 @@ final class FrameDrawList implements AutoCloseable {
         pass.setUniform("SurfaceFrame", this.frameSlice);
         pass.setUniform("Sampler2", Minecraft.getInstance().gameRenderer.levelLightmap(), RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
         pass.setUniform("SurfaceTile", slice);
+        // Only the segments whose neighbour is drawn this frame (see BorderSeam.runs): a segment sewn ahead for a chunk
+        // that is loaded but not drawn yet waits in the mesh until its frame comes.
+        // / Только отрезки, чей сосед рисуется в этом кадре (см. BorderSeam.runs): отрезок, сшитый заранее для загруженного,
+        // но ещё не рисуемого чанка, ждёт в меше, пока не придёт его кадр.
+        this.computeSeamRuns();
+        if (this.seamRunCount == 0) {
+            return;
+        }
         pass.setVertexBuffer(0, vertices);
         pass.setIndexBuffer(buffer, IndexType.INT);
-        pass.drawIndexed(this.seam.ownIndexCount(), 1, this.seam.ownFirstIndex(), 0, 0);
+        int total = this.seam.ownIndexCount() / 6;
+        int drawn = 0;
+        for (int block = 0; block < 2; block++) {
+            for (int r = 0; r + 1 < this.seamRunCount; r += 2) {
+                int count = this.seamRunScratch[r + 1] * 3;
+                pass.drawIndexed(count, 1, this.seam.ownFirstIndex() + (block * total + this.seamRunScratch[r]) * 3, 0, 0);
+                drawn += count;
+            }
+        }
         if (PerfLog.ON) {
-            PerfLog.draw(this.seam.ownIndexCount());
+            PerfLog.draw(drawn);
         }
     }
     private boolean separateMultiDraw() {

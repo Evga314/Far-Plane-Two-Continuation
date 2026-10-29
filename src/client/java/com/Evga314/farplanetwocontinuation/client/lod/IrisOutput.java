@@ -331,7 +331,9 @@ final class IrisOutput implements IrisGlue.Bridge {
             // The border seam, in the pack's format like the tiles; its indices are ints, as it is one mesh for the whole border.
             // / Пограничный шов, в формате пака, как тайлы; его индексы - int, потому что он один меш на всю границу.
             BorderSeam.PackMesh seam = list.seamPack();
-            if (seam != null && seam.buffer() instanceof GlBuffer seamBuffer) {
+            int[] runs = list.seamPackRuns();
+            int runLength = list.seamRunLength();
+            if (seam != null && runLength > 0 && seam.buffer() instanceof GlBuffer seamBuffer) {
                 GL20C.glUniform3f(program.modelOffsetUniform, (float) (seam.originX() - camX), (float) (seam.baseY() - camY),
                         (float) (seam.originZ() - camZ));
                 int handle = seamBuffer.handle();
@@ -343,9 +345,19 @@ final class IrisOutput implements IrisGlue.Bridge {
                 GlStateManager._vertexAttribIPointer(0, 4, GL11C.GL_UNSIGNED_SHORT, PackMesher.SIZE, 0L);
                 GlStateManager._vertexAttribPointer(1, 4, GL11C.GL_UNSIGNED_BYTE, true, PackMesher.SIZE, PackMesher.COLOR);
                 GlStateManager._vertexAttribIPointer(2, 4, GL11C.GL_UNSIGNED_BYTE, PackMesher.SIZE, PackMesher.EXTRA);
-                GL11C.glDrawElements(GL11C.GL_TRIANGLES, seam.indexCount(), GL11C.GL_UNSIGNED_INT, seam.vertexBytes());
+                // Only the segments whose neighbour vanilla draws this frame (see BorderSeam.runs).
+                // / Только отрезки, чьего соседа ванилла рисует в этом кадре (см. BorderSeam.runs).
+                int total = seam.indexCount() / 6;
+                int drawn = 0;
+                for (int block = 0; block < 2; block++) {
+                    for (int r = 0; r + 1 < runLength; r += 2) {
+                        int drawCount = runs[r + 1] * 3;
+                        GL11C.glDrawElements(GL11C.GL_TRIANGLES, drawCount, GL11C.GL_UNSIGNED_INT, seam.vertexBytes() + (long) (block * total + runs[r]) * 12L);
+                        drawn += drawCount;
+                    }
+                }
                 if (PerfLog.ON) {
-                    PerfLog.draw(seam.indexCount());
+                    PerfLog.draw(drawn);
                 }
             }
         }

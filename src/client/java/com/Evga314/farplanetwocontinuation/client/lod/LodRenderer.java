@@ -747,7 +747,7 @@ public final class LodRenderer {
             // take the new mesh too (stage 7 of the rewrite). Nothing of the old passes is written.
             Matrix4f vanillaProjection = this.bobbedProjection != null ? this.bobbedProjection : camera.projectionMatrix;
             this.drawList.prepare(this.visible, camX, camY, camZ, camera.viewRotationMatrix, vanillaProjection, zeroToOne, UNLIT, hasSky,
-                NO_SKY_FOG_RED, NO_SKY_FOG_GREEN, NO_SKY_FOG_BLUE, canopyStart, waterBlur);
+                NO_SKY_FOG_RED, NO_SKY_FOG_GREEN, NO_SKY_FOG_BLUE, 0.0F, waterBlur);
             this.pendingDraw = pass -> IrisGlue.drawTerrain(this.drawList);
             this.pendingWater = null;
             return;
@@ -850,7 +850,7 @@ public final class LodRenderer {
         Matrix4f vanillaProjection = this.bobbedProjection != null ? this.bobbedProjection : camera.projectionMatrix;
         // The tiles take their light from vanilla's lightmap alone, as the old ones (UNLIT); the modulator is for the patches.
         this.drawList.prepare(this.visible, camX, camY, camZ, camera.viewRotationMatrix, vanillaProjection, zeroToOne, UNLIT, hasSky,
-            NO_SKY_FOG_RED, NO_SKY_FOG_GREEN, NO_SKY_FOG_BLUE, canopyStart, waterBlur);
+            NO_SKY_FOG_RED, NO_SKY_FOG_GREEN, NO_SKY_FOG_BLUE, 0.0F, waterBlur);
         if (PerfLog.ON) {
             phase = PerfLog.renderPhase(3, phase);
         }

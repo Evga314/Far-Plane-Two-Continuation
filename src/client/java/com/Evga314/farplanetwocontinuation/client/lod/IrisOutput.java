@@ -47,6 +47,7 @@ final class IrisOutput implements IrisGlue.Bridge {
     private static final int MAX_DRAW_BUFFERS = 8;
     /** DH's offset of faces that would fight, which the LOD terrain does not use. */
     private static final float MICRO_OFFSET = 0.01F;
+    private static final double WATER_DIP = 1.0 / 9.0;
     /** Stages of a frame, see {@link #withState}. */
     private static final int CLEAR = 0;
     private static final int TERRAIN = 1;
@@ -297,7 +298,7 @@ final class IrisOutput implements IrisGlue.Bridge {
                 continue;
             }
             float offsetX = (float) (mesh.pos.minX() - camX);
-            float offsetY = (float) (surface.baseY() - camY);
+            float offsetY = (float) (surface.baseY() - camY - (water ? WATER_DIP : 0.0));
             float offsetZ = (float) (mesh.pos.minZ() - camZ);
             GL20C.glUniform3f(program.modelOffsetUniform, offsetX, offsetY, offsetZ);
 // TEMP CHECK: the first tile's numbers. / ВРЕМЕННАЯ ПРОВЕРКА: числа первого тайла.

@@ -391,8 +391,8 @@ public final class TileMeshBuilder {
                         alphas[index] = 255 - Math.round(canopy * CANOPY_UNITS);
                     }
                 }
-                // Vanilla draws the top of water 1/9 block under the block's top; rough water lies a little under it, so where both are
-                // drawn the rough one never covers vanilla's.
+                // Vanilla draws the top of water 1/9 block under the block's top; rough water lies at the same ninth (see
+                // WATER_UNDER_VANILLA), so the two surfaces meet at the border.
                 tops[index] = water && !hasLand[index] ? height - WATER_UNDER_VANILLA : height;
                 bare[index] = hasLand[index] && !water && !lava && alphas[index] == 255 && biome != null && (flags & TileData.FLAG_ICEBERG) == 0;
                 minY = Math.min(minY, height);
@@ -2154,8 +2154,8 @@ public final class TileMeshBuilder {
      * straight over eight of this tile's cells.
      */
     private static final int SKIRT_REACH = 8;
-    /** How far rough water lies under the block top of the sea level: vanilla's water surface is at 8/9, this a little more. */
-    private static final float WATER_UNDER_VANILLA = 0.15F;
+    /** How far rough water lies under the block top of the sea level: vanilla's water surface is at 8/9, that's the same from 1.3.43. */
+    private static final float WATER_UNDER_VANILLA = 1.0F / 9.0F;
     /** The color the debug build marks things with, see DebugToggles. */
     private static final int DEBUG_SKIRT = 0xFFFF0060;
     private static final float MAX_SKIRT_DEPTH = 1024.0F;

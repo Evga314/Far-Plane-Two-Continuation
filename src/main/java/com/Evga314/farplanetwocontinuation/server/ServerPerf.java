@@ -125,9 +125,19 @@ final class ServerPerf {
         long prepare = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_PREPARE_NANOS.getAndSet(0L);
         long terrain = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_TERRAIN_NANOS.getAndSet(0L);
         long decorate = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_DECORATE_NANOS.getAndSet(0L);
+        long bands = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_BANDS_NANOS.getAndSet(0L);
+        long biomes = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_BIOMES_NANOS.getAndSet(0L);
+        long starts = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_STARTS_NANOS.getAndSet(0L);
+        long references = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_REFERENCES_NANOS.getAndSet(0L);
+        long noise = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_NOISE_NANOS.getAndSet(0L);
+        long surface = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_SURFACE_NANOS.getAndSet(0L);
+        long structures = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_STRUCTURES_NANOS.getAndSet(0L);
+        long features = com.Evga314.farplanetwocontinuation.server.virtual.VirtualTerrain.PERF_FEATURES_NANOS.getAndSet(0L);
         if (built + reused > 0L) {
             line.append(String.format(Locale.ROOT, " | virtual cpu: prepare %.0f ms, terrain %.0f ms, decorate %.0f ms; terrain built %d, reused from cache %d (%.0f%%)",
                 prepare / 1e6, terrain / 1e6, decorate / 1e6, built, reused, 100.0 * reused / (built + reused)));
+            line.append(String.format(Locale.ROOT, " | virtual stages: bands %.0f ms, biomes %.0f ms, starts %.0f ms, references %.0f ms, noise %.0f ms, surface %.0f ms, structures %.0f ms, features %.0f ms",
+                bands / 1e6, biomes / 1e6, starts / 1e6, references / 1e6, noise / 1e6, surface / 1e6, structures / 1e6, features / 1e6));
         }
         long cells = DETAIL_CELLS.getAndSet(0L);
         long scanned = DETAIL_SEGMENTS_SCANNED.getAndSet(0L);

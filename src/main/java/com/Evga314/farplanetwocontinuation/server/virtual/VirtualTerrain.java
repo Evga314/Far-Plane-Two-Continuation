@@ -135,6 +135,18 @@ public final class VirtualTerrain {
     public static final java.util.concurrent.atomic.AtomicLong PERF_PREPARE_NANOS = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_NANOS = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong PERF_DECORATE_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    /**
+     * Processor time of the single stages of {@link #generate}, printed by {@code ServerPerf} next to the three coarse buckets.
+     * Процессорное время отдельных стадий {@link #generate}, печатается в {@code ServerPerf} рядом с тремя грубыми суммами.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong PERF_BANDS_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_BIOMES_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_STARTS_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_REFERENCES_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_NOISE_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_SURFACE_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_STRUCTURES_NANOS = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong PERF_FEATURES_NANOS = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_BUILT = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong PERF_TERRAIN_REUSED = new java.util.concurrent.atomic.AtomicLong();
     private static final java.lang.management.ThreadMXBean THREADS = java.lang.management.ManagementFactory.getThreadMXBean();
@@ -281,7 +293,30 @@ public final class VirtualTerrain {
         int originZ = minZ - MARGIN;
         long cpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
         ProtoChunk[] area = new ProtoChunk[sizeX * sizeZ];
+        long bandsCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
         int[] bands = this.surfaceBands(originX, originZ, sizeX, sizeZ);
+        if (PERF) {
+            PERF_BANDS_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - bandsCpu);
+        }
+        // Structure starts of the whole batch and a margin around it, read once into a plain grid. Decoration probes
+        // them for every chunk from a square of 17 by 17 around it, and every probe through the shared cache was a
+        // synchronized lookup on a map all helper threads share. The grid is filled here, on this one thread, and only
+        // read afterwards, so the parallel phases never touch the lock for starts again.
+        // Старты структур всего батча и поля вокруг него, прочитанные один раз в обычную сетку. Декорация спрашивает их
+        // для каждого чанка из квадрата 17 на 17 вокруг него, и каждый запрос через общий кэш был синхронизированным
+        // поиском по карте, которую делят все потоки-помощники. Сетка заполняется здесь, в этом одном потоке, а дальше
+        // только читается, поэтому параллельные фазы больше не трогают блокировку ради стартов.
+        int gridOriginX = originX - STRUCTURE_RANGE;
+        int gridOriginZ = originZ - STRUCTURE_RANGE;
+        int gridSizeX = sizeX + STRUCTURE_RANGE * 2;
+        int gridSizeZ = sizeZ + STRUCTURE_RANGE * 2;
+        @SuppressWarnings("unchecked")
+        Map<Structure, StructureStart>[] startsGrid = new Map[gridSizeX * gridSizeZ];
+        for (int gz = 0; gz < gridSizeZ; gz++) {
+            for (int gx = 0; gx < gridSizeX; gx++) {
+                startsGrid[gx + gz * gridSizeX] = this.startsAt(gridOriginX + gx, gridOriginZ + gz);
+            }
+        }
         for (int z = 0; z < sizeZ; z++) {
             for (int x = 0; x < sizeX; x++) {
                 int index = x + z * sizeX;
@@ -292,11 +327,11 @@ public final class VirtualTerrain {
                     this.fillBiomes(chunk, bands[index * 2], bands[index * 2 + 1]);
                     chunk.setPersistedStatus(ChunkStatus.BIOMES);
                 }
-                chunk.setAllStarts(this.startsAt(pos.x(), pos.z()));
+                chunk.setAllStarts(startsGrid[(pos.x() - gridOriginX) + (pos.z() - gridOriginZ) * gridSizeX]);
                 area[index] = chunk;
             }
         }
-        Area chunks = new Area(this, originX, originZ, sizeX, sizeZ, area);
+        Area chunks = new Area(this, originX, originZ, sizeX, sizeZ, area, startsGrid, gridOriginX, gridOriginZ, gridSizeX, gridSizeZ);
         if (PERF) {
             long now = THREADS.getCurrentThreadCpuTime();
             PERF_PREPARE_NANOS.addAndGet(now - cpu);
@@ -310,7 +345,11 @@ public final class VirtualTerrain {
             int index = (1 + i % innerX) + (1 + i / innerX) * sizeX;
             ProtoChunk chunk = area[index];
             WorkThrottle.yieldToFrames();
-            this.addReferences(chunk);
+            long referencesCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
+            this.addReferences(chunks, chunk);
+            if (PERF) {
+                PERF_REFERENCES_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - referencesCpu);
+            }
             if (!chunk.getPersistedStatus().isOrAfter(ChunkStatus.TERRAIN)) {
                 this.buildTerrain(chunks, chunk, bands[index * 2], bands[index * 2 + 1], rule);
                 this.storeTerrain(chunk);
@@ -447,6 +486,7 @@ public final class VirtualTerrain {
 
     /** Vanilla's biome step, for the sections of the band only. */
     private void fillBiomes(ProtoChunk chunk, int bottom, int top) {
+        long biomesCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
         if (top <= bottom) {
             return;
         }
@@ -463,6 +503,9 @@ public final class VirtualTerrain {
             }
         } finally {
             this.randomState.releaseDensityBufferPool(pool);
+        }
+        if (PERF) {
+            PERF_BIOMES_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - biomesCpu);
         }
     }
 
@@ -508,10 +551,14 @@ public final class VirtualTerrain {
         if (!this.structures) {
             return Map.of();
         }
+        long startsCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
         long key = ChunkPos.pack(chunkX, chunkZ);
         synchronized (this.starts) {
             Map<Structure, StructureStart> cached = this.starts.get(key);
             if (cached != null) {
+                if (PERF) {
+                    PERF_STARTS_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - startsCpu);
+                }
                 return cached;
             }
         }
@@ -538,17 +585,20 @@ public final class VirtualTerrain {
         synchronized (this.starts) {
             this.starts.put(key, found);
         }
+        if (PERF) {
+            PERF_STARTS_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - startsCpu);
+        }
         return found;
     }
 
     /** The same references vanilla adds in its structure references step: every nearby start whose bounds reach this chunk. */
-    private void addReferences(ChunkAccess chunk) {
+    private void addReferences(Area chunks, ChunkAccess chunk) {
         ChunkPos pos = chunk.getPos();
         int minX = pos.getMinBlockX();
         int minZ = pos.getMinBlockZ();
         for (int sourceZ = pos.z() - STRUCTURE_RANGE; sourceZ <= pos.z() + STRUCTURE_RANGE; sourceZ++) {
             for (int sourceX = pos.x() - STRUCTURE_RANGE; sourceX <= pos.x() + STRUCTURE_RANGE; sourceX++) {
-                for (StructureStart start : this.startsAt(sourceX, sourceZ).values()) {
+                for (StructureStart start : chunks.startsAt(sourceX, sourceZ).values()) {
                     if (start.isValid() && start.getBoundingBox().intersects(minX, minZ, minX + 15, minZ + 15)) {
                         chunk.addReferenceForStructure(start.getStructure(), ChunkPos.pack(sourceX, sourceZ));
                     }
@@ -571,7 +621,11 @@ public final class VirtualTerrain {
             DensityVolume volume = new DensityVolume(16, noiseSettings.height(), 16, pos.getMinBlockX(), noiseSettings.minY(), pos.getMinBlockZ());
             Beardifier beardifier = Beardifier.forStructuresInChunk(structureManager, pos);
             try (NoiseChunk noiseChunk = new NoiseChunk(this.randomState, beardifier, this.surfaceSettings, this.fluidPicker, Blender.empty(), volume)) {
+                long fillCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
                 access.farplane$doFill(noiseChunk, chunk);
+                if (PERF) {
+                    PERF_NOISE_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - fillCpu);
+                }
                 int filledTop = noiseSettings.minY() + noiseSettings.height();
                 if (filledTop < fullTop && reachesTop(chunk, filledTop - 1)) {
                     this.fillBiomes(chunk, top, fullTop);
@@ -579,10 +633,15 @@ public final class VirtualTerrain {
                     if (rest.height() > 0) {
                         DensityVolume restVolume = new DensityVolume(16, rest.height(), 16, pos.getMinBlockX(), rest.minY(), pos.getMinBlockZ());
                         try (NoiseChunk restChunk = new NoiseChunk(this.randomState, beardifier, this.surfaceSettings, this.fluidPicker, Blender.empty(), restVolume)) {
+                            long fillCpu2 = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
                             access.farplane$doFill(restChunk, chunk);
+                            if (PERF) {
+                                PERF_NOISE_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - fillCpu2);
+                            }
                         }
                     }
                 }
+                long surfaceCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
                 BUILDING_SURFACE.set(true);
                 try {
                     access.farplane$buildSurface(
@@ -590,6 +649,9 @@ public final class VirtualTerrain {
                     );
                 } finally {
                     BUILDING_SURFACE.set(false);
+                }
+                if (PERF) {
+                    PERF_SURFACE_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - surfaceCpu);
                 }
             }
         }
@@ -651,6 +713,7 @@ public final class VirtualTerrain {
             if (step < steps.length && !VISIBLE_STEPS.contains(steps[step])) {
                 continue;
             }
+            long structuresCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
             int index = 0;
             if (this.structures) {
                 for (Structure structure : this.structuresByStep.getOrDefault(step, List.of())) {
@@ -665,6 +728,9 @@ public final class VirtualTerrain {
                     index++;
                 }
             }
+            if (PERF) {
+                PERF_STRUCTURES_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - structuresCpu);
+            }
             if (step >= featureList.size()) {
                 continue;
             }
@@ -678,6 +744,7 @@ public final class VirtualTerrain {
                     }
                 }
             }
+            long featuresCpu = PERF ? THREADS.getCurrentThreadCpuTime() : 0L;
             int[] indices = possibleFeatures.toIntArray();
             Arrays.sort(indices);
             for (int globalIndex : indices) {
@@ -691,6 +758,9 @@ public final class VirtualTerrain {
                 } catch (RuntimeException e) {
                     LOGGER.debug("Could not place feature in virtual chunk {}", centerPos, e);
                 }
+            }
+            if (PERF) {
+                PERF_FEATURES_NANOS.addAndGet(THREADS.getCurrentThreadCpuTime() - featuresCpu);
             }
         }
         chunk.setPersistedStatus(ChunkStatus.FEATURES);
@@ -715,17 +785,29 @@ public final class VirtualTerrain {
         private final int sizeX;
         private final int sizeZ;
         private final ProtoChunk[] chunks;
+        /** Structure starts of this batch and its margin, see {@link VirtualTerrain#generate}; read-only once the batch runs. */
+        private final Map<Structure, StructureStart>[] startsGrid;
+        private final int gridOriginX;
+        private final int gridOriginZ;
+        private final int gridSizeX;
+        private final int gridSizeZ;
         private final Long2ObjectOpenHashMap<VirtualHolder> holders = new Long2ObjectOpenHashMap<>();
         /** Stands in for every chunk outside the area without structure starts: nothing is read from those but their starts. */
         private final ProtoChunk empty;
 
-        Area(VirtualTerrain terrain, int originX, int originZ, int sizeX, int sizeZ, ProtoChunk[] chunks) {
+        Area(VirtualTerrain terrain, int originX, int originZ, int sizeX, int sizeZ, ProtoChunk[] chunks,
+            Map<Structure, StructureStart>[] startsGrid, int gridOriginX, int gridOriginZ, int gridSizeX, int gridSizeZ) {
             this.terrain = terrain;
             this.originX = originX;
             this.originZ = originZ;
             this.sizeX = sizeX;
             this.sizeZ = sizeZ;
             this.chunks = chunks;
+            this.startsGrid = startsGrid;
+            this.gridOriginX = gridOriginX;
+            this.gridOriginZ = gridOriginZ;
+            this.gridSizeX = gridSizeX;
+            this.gridSizeZ = gridSizeZ;
             this.empty = terrain.newChunk(new ChunkPos(originX - STRUCTURE_RANGE - 1, originZ - STRUCTURE_RANGE - 1));
             this.empty.setPersistedStatus(ChunkStatus.STRUCTURE_STARTS);
         }
@@ -750,13 +832,28 @@ public final class VirtualTerrain {
             }
         }
 
+        /**
+         * Structure starts of one position from the batch grid, or from the terrain's shared cache when the position lies
+         * outside the grid (a decoration region reaching further than the margin the grid was filled with).
+         * Старты структур одной позиции из сетки батча, или из общего кэша террейна, если позиция лежит вне сетки
+         * (регион декорации дотянулся дальше поля, с которым сетка была заполнена).
+         */
+        Map<Structure, StructureStart> startsAt(int x, int z) {
+            int localX = x - this.gridOriginX;
+            int localZ = z - this.gridOriginZ;
+            if (localX >= 0 && localZ >= 0 && localX < this.gridSizeX && localZ < this.gridSizeZ) {
+                return this.startsGrid[localX + localZ * this.gridSizeX];
+            }
+            return this.terrain.startsAt(x, z);
+        }
+
         private ChunkAccess chunkAt(int x, int z) {
             int localX = x - this.originX;
             int localZ = z - this.originZ;
             if (localX >= 0 && localZ >= 0 && localX < this.sizeX && localZ < this.sizeZ) {
                 return this.chunks[localX + localZ * this.sizeX];
             }
-            Map<Structure, StructureStart> starts = this.terrain.startsAt(x, z);
+            Map<Structure, StructureStart> starts = this.startsAt(x, z);
             if (starts.isEmpty()) {
                 return this.empty;
             }
